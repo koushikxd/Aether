@@ -10,9 +10,11 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import type { Note, NoteMetadata } from "../types/note";
 import * as notesService from "../services/notes";
 import type { SearchResult } from "../services/notes";
+import { errorMessage } from "../services/export";
 
 // Separate contexts to prevent unnecessary re-renders
 // Data context: changes frequently, only subscribed by components that need the data
@@ -35,7 +37,14 @@ interface NotesActionsContextValue {
   selectNote: (id: string) => Promise<void>;
   createNote: () => Promise<void>;
   consumePendingNewNote: (id: string) => boolean;
-  saveNote: (content: string, noteId?: string) => Promise<void>;
+  /** `onSaved` runs with the saved note before any state changes. */
+  saveNote: (
+    content: string,
+    noteId?: string,
+    onSaved?: (note: Note) => void,
+  ) => Promise<void>;
+  /** Registers the editor's flush, which moves await before paths change. */
+  setPendingSaveFlush: (flush: (() => Promise<void>) | null) => void;
   deleteNote: (id: string) => Promise<void>;
   duplicateNote: (id: string) => Promise<void>;
   refreshNotes: () => Promise<void>;
@@ -81,17 +90,20 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   const selectedNoteIdRef = useRef<string | null>(null);
   // Ref to access notes in search callback without re-creating it on every notes change
   const notesRef = useRef<NoteMetadata[]>([]);
+  const currentNoteRef = useRef<Note | null>(null);
   // Layout effect so async callbacks see the new values as soon as they commit
   useLayoutEffect(() => {
     selectedNoteIdRef.current = selectedNoteId;
     notesRef.current = notes;
-  }, [selectedNoteId, notes]);
+    currentNoteRef.current = currentNote;
+  }, [selectedNoteId, notes, currentNote]);
   // Monotonic counter to ignore stale async note selection responses.
   const selectRequestIdRef = useRef(0);
   // Monotonic counter to ignore stale async search responses
   const searchRequestIdRef = useRef(0);
   // Tracks the ID of a newly created note so Editor can focus its title.
   const pendingNewNoteIdRef = useRef<string | null>(null);
+  const flushPendingSaveRef = useRef<(() => Promise<void>) | null>(null);
 
   const refreshNotes = useCallback(async () => {
     if (!notesFolder) return;
@@ -191,8 +203,38 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     return true;
   }, []);
 
+  // Moves change note ids and can rewrite links inside the open note:
+  // follow it to its new id, or reload it when its file changed.
+  const followSelectedNote = useCallback(
+    async (newIdOf: (id: string) => string) => {
+      const oldId = selectedNoteIdRef.current;
+      if (!oldId) return;
+      const id = newIdOf(oldId);
+      const loaded = currentNoteRef.current?.content;
+      const note = await notesService.readNote(id);
+      if (selectedNoteIdRef.current !== oldId) return;
+      // The file watcher reports these writes; they are not external edits
+      recentlySavedRef.current.add(id);
+      setTimeout(() => recentlySavedRef.current.delete(id), 1000);
+      if (id !== oldId) {
+        // A selectNote read for the old id must not replace this note
+        selectRequestIdRef.current += 1;
+        setSelectedNoteId(id);
+        setCurrentNote(note);
+      } else if (note.content !== loaded) {
+        setCurrentNote(note);
+        setReloadVersion((v) => v + 1);
+      }
+    },
+    [],
+  );
+
   const saveNote = useCallback(
-    async (content: string, noteId?: string) => {
+    async (
+      content: string,
+      noteId?: string,
+      onSaved?: (note: Note) => void,
+    ) => {
       // Use provided noteId (for flush saves) or fall back to currentNote.id
       const savingNoteId = noteId || currentNote?.id;
       if (!savingNoteId) return;
@@ -204,23 +246,12 @@ export function NotesProvider({ children }: { children: ReactNode }) {
 
         const updated = await notesService.saveNote(savingNoteId, content);
         updatedId = updated.id;
+        onSaved?.(updated);
 
-        // If the note was renamed (ID changed), also mark the new ID
+        // If the note was renamed (ID changed), also mark the new ID.
+        // The backend moved its pins, and its sub-pages' pins, along.
         if (updated.id !== savingNoteId) {
           recentlySavedRef.current.add(updated.id);
-
-          // Transfer pin status to new ID
-          const currentSettings = await notesService.getSettings();
-          const pinnedIds = currentSettings.pinnedNoteIds || [];
-          if (pinnedIds.includes(savingNoteId)) {
-            const updatedSettings = {
-              ...currentSettings,
-              pinnedNoteIds: pinnedIds.map((id) =>
-                id === savingNoteId ? updated.id : id,
-              ),
-            };
-            await notesService.updateSettings(updatedSettings);
-          }
         }
 
         // Clear external changes flag - if it was set by our own save, we want to ignore it
@@ -238,6 +269,17 @@ export function NotesProvider({ children }: { children: ReactNode }) {
           return prevId;
         });
 
+        // A renamed page took its sub-pages along, maybe the open one
+        const prefix = `${savingNoteId}/`;
+        if (
+          updated.id !== savingNoteId &&
+          selectedNoteIdRef.current?.startsWith(prefix)
+        ) {
+          await followSelectedNote(
+            (selected) => `${updated.id}/${selected.slice(prefix.length)}`,
+          );
+        }
+
         // Schedule refresh with debounce - avoids blocking typing during rapid saves
         scheduleRefresh();
 
@@ -254,28 +296,31 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         if (updatedId) recentlySavedRef.current.delete(updatedId);
       }
     },
-    [currentNote, scheduleRefresh],
+    [currentNote, scheduleRefresh, followSelectedNote],
   );
 
   const deleteNote = useCallback(
     async (id: string) => {
+      // A page's sub-pages are deleted with it
+      const isDeleted = (noteId: string) =>
+        noteId === id || noteId.startsWith(`${id}/`);
       try {
         await notesService.deleteNote(id);
 
-        // Clean up pinned status for deleted note
+        // Clean up pinned status for deleted notes
         const currentSettings = await notesService.getSettings();
         const pinnedIds = currentSettings.pinnedNoteIds || [];
-        if (pinnedIds.includes(id)) {
+        if (pinnedIds.some(isDeleted)) {
           const updatedSettings = {
             ...currentSettings,
-            pinnedNoteIds: pinnedIds.filter((pinId) => pinId !== id),
+            pinnedNoteIds: pinnedIds.filter((pinId) => !isDeleted(pinId)),
           };
           await notesService.updateSettings(updatedSettings);
         }
 
         // Only clear selection if we're deleting the currently selected note
         setSelectedNoteId((prevId) => {
-          if (prevId === id) {
+          if (prevId && isDeleted(prevId)) {
             setCurrentNote(null);
             return null;
           }
@@ -367,7 +412,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
           recentlySavedRef.current.delete(note.id);
         }, 1000);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to create note");
+        toast.error(errorMessage(err, "Failed to create note"));
       }
     },
     [refreshNotes],
@@ -410,9 +455,18 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     [refreshNotes],
   );
 
+  const setPendingSaveFlush = useCallback(
+    (flush: (() => Promise<void>) | null) => {
+      flushPendingSaveRef.current = flush;
+    },
+    [],
+  );
+
   const renameFolderAction = useCallback(
     async (oldPath: string, newName: string) => {
       try {
+        // A save still pending afterwards would write to the old path
+        await flushPendingSaveRef.current?.();
         await notesService.renameFolder(oldPath, newName);
 
         // Compute new folder path
@@ -424,26 +478,11 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         const oldPrefix = oldPath + "/";
         const newPrefix = newPath + "/";
 
-        // Update selectedNoteId if it was inside the renamed folder
-        setSelectedNoteId((prevId) => {
-          if (prevId && prevId.startsWith(oldPrefix)) {
-            const newId = newPrefix + prevId.substring(oldPrefix.length);
-            notesService
-              .readNote(newId)
-              .then((note) => {
-                setCurrentNote(note);
-              })
-              .catch((err) => {
-                setError(
-                  err instanceof Error
-                    ? err.message
-                    : "Failed to read renamed note",
-                );
-              });
-            return newId;
-          }
-          return prevId;
-        });
+        await followSelectedNote((selected) =>
+          selected.startsWith(oldPrefix)
+            ? newPrefix + selected.substring(oldPrefix.length)
+            : selected,
+        );
 
         await refreshNotes();
       } catch (err) {
@@ -452,43 +491,32 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         );
       }
     },
-    [refreshNotes],
+    [refreshNotes, followSelectedNote],
   );
 
   const moveNoteAction = useCallback(
     async (id: string, targetFolder: string) => {
       try {
+        await flushPendingSaveRef.current?.();
         const newId = await notesService.moveNote(id, targetFolder);
-        // Update selection if we moved the selected note
-        setSelectedNoteId((prevId) => {
-          if (prevId === id) {
-            notesService
-              .readNote(newId)
-              .then((note) => {
-                setCurrentNote(note);
-              })
-              .catch((err) => {
-                setError(
-                  err instanceof Error
-                    ? err.message
-                    : "Failed to read moved note",
-                );
-              });
-            return newId;
-          }
-          return prevId;
-        });
+        // A page's sub-pages move with it
+        await followSelectedNote((selected) =>
+          selected === id || selected.startsWith(`${id}/`)
+            ? newId + selected.slice(id.length)
+            : selected,
+        );
         await refreshNotes();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to move note");
       }
     },
-    [refreshNotes],
+    [refreshNotes, followSelectedNote],
   );
 
   const moveFolderAction = useCallback(
     async (path: string, targetParent: string) => {
       try {
+        await flushPendingSaveRef.current?.();
         await notesService.moveFolder(path, targetParent);
 
         // Compute new folder path
@@ -501,33 +529,18 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         const oldPrefix = path + "/";
         const newPrefix = newPath + "/";
 
-        // Update selectedNoteId if it was inside the moved folder
-        setSelectedNoteId((prevId) => {
-          if (prevId && prevId.startsWith(oldPrefix)) {
-            const newId = newPrefix + prevId.substring(oldPrefix.length);
-            notesService
-              .readNote(newId)
-              .then((note) => {
-                setCurrentNote(note);
-              })
-              .catch((err) => {
-                setError(
-                  err instanceof Error
-                    ? err.message
-                    : "Failed to read moved note",
-                );
-              });
-            return newId;
-          }
-          return prevId;
-        });
+        await followSelectedNote((selected) =>
+          selected.startsWith(oldPrefix)
+            ? newPrefix + selected.substring(oldPrefix.length)
+            : selected,
+        );
 
         await refreshNotes();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to move folder");
       }
     },
-    [refreshNotes],
+    [refreshNotes, followSelectedNote],
   );
 
   const setNotesFolder = useCallback(async (path: string) => {
@@ -745,6 +758,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       createNote,
       consumePendingNewNote,
       saveNote,
+      setPendingSaveFlush,
       deleteNote,
       duplicateNote,
       refreshNotes,
@@ -767,6 +781,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       createNote,
       consumePendingNewNote,
       saveNote,
+      setPendingSaveFlush,
       deleteNote,
       duplicateNote,
       refreshNotes,

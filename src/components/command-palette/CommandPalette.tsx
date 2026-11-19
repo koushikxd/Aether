@@ -30,6 +30,8 @@ import {
 } from "../ui";
 import { cleanTitle } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
+import { useDeleteNoteWarning } from "../../lib/folderTree";
+import { editorMarkdown } from "../../lib/assetPaths";
 import { duplicateNote } from "../../services/notes";
 import {
   CopyIcon,
@@ -101,6 +103,9 @@ export function CommandPalette({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
+  const deleteWarning = useDeleteNoteWarning(
+    deleteDialogOpen ? noteToDelete : null,
+  );
   const [localSearchResults, setLocalSearchResults] = useState<
     { id: string; title: string; preview: string; modified: number }[]
   >([]);
@@ -362,18 +367,16 @@ export function CommandPalette({
                 toast.error("No note selected");
                 return;
               }
-              // Use live editor content with nbsp cleanup, fall back to saved content
-              let markdown = currentNote.content;
+              // Use live editor content, fall back to saved content
               const editorInstance = editorRef?.current;
-              if (editorInstance) {
-                const manager = editorInstance.storage.markdown?.manager;
-                if (manager) {
-                  markdown = manager.serialize(editorInstance.getJSON());
-                  markdown = markdown.replace(/&nbsp;|&#160;/g, " ");
-                } else {
-                  markdown = editorInstance.getText();
-                }
-              }
+              const markdown = editorInstance
+                ? editorMarkdown(
+                    editorInstance,
+                    notesFolder
+                      ? { notesFolder, noteId: currentNote.id }
+                      : null,
+                  )
+                : currentNote.content;
               const saved = await downloadMarkdown(markdown, currentNote.title);
               if (saved) {
                 toast.success("Markdown saved successfully");
@@ -776,13 +779,15 @@ export function CommandPalette({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete note?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently delete the note and all its content. This
-              action cannot be undone.
+              {deleteWarning.text}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteConfirm}>
+            <AlertDialogAction
+              disabled={!deleteWarning.ready}
+              onClick={handleDeleteConfirm}
+            >
               Delete
             </AlertDialogAction>
           </AlertDialogFooter>

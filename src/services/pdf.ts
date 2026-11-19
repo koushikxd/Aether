@@ -1,5 +1,5 @@
 import type { Editor } from "@tiptap/react";
-import { save } from "@tauri-apps/plugin-dialog";
+import { save, type DialogFilter } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 /**
  * Triggers the native print dialog for the editor content.
@@ -19,35 +19,42 @@ export async function downloadPdf(
 }
 
 /**
+ * Asks where to save a text file, suggesting `<title>.<extension>`, and
+ * writes it there. Returns false if the user cancelled.
+ */
+export async function saveTextFile(
+  text: string,
+  title: string,
+  filter: DialogFilter,
+): Promise<boolean> {
+  const filePath = await save({
+    defaultPath: `${sanitizeFilename(title)}.${filter.extensions[0]}`,
+    filters: [filter],
+  });
+  if (!filePath) return false;
+
+  await invoke("write_file", {
+    path: filePath,
+    contents: Array.from(new TextEncoder().encode(text)),
+  });
+  return true;
+}
+
+/**
  * Downloads the markdown content as a .md file.
  *
  * @param markdown - The markdown content to save
  * @param noteTitle - The note title for the default filename
  * @returns Promise<boolean> - Returns true if file was saved successfully, false if user cancelled
  */
-export async function downloadMarkdown(
+export function downloadMarkdown(
   markdown: string,
   noteTitle: string,
 ): Promise<boolean> {
-  const sanitizedTitle = sanitizeFilename(noteTitle);
-
-  // Show native save dialog
-  const filePath = await save({
-    defaultPath: `${sanitizedTitle}.md`,
-    filters: [{ name: "Markdown", extensions: ["md"] }],
+  return saveTextFile(markdown, noteTitle, {
+    name: "Markdown",
+    extensions: ["md"],
   });
-
-  if (!filePath) return false; // User cancelled
-
-  // Convert string to bytes and write file using Tauri command
-  const encoder = new TextEncoder();
-  const uint8Array = encoder.encode(markdown);
-  await invoke("write_file", {
-    path: filePath,
-    contents: Array.from(uint8Array),
-  });
-
-  return true;
 }
 
 /**
@@ -57,6 +64,6 @@ export async function downloadMarkdown(
  * @param name - The filename to sanitize
  * @returns A filesystem-safe filename
  */
-function sanitizeFilename(name: string): string {
+export function sanitizeFilename(name: string): string {
   return name.replace(/[/\\?%*:|"<>]/g, "-").trim() || "note";
 }

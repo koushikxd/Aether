@@ -652,6 +652,138 @@ html.dark {
   border-inline-start-color: var(--color-border);
 }
 
+/* Callouts */
+.prose .callout {
+  display: flex;
+  gap: 0.5em;
+  padding: 0.75em 1em;
+  margin-bottom: var(--editor-paragraph-spacing);
+  border-radius: 6px;
+  background-color: var(--color-bg-muted);
+}
+.prose .callout-icon {
+  flex: none;
+  height: 1.75em;
+  padding: 0 0.15em;
+  border-radius: 4px;
+  line-height: 1.75;
+  cursor: pointer;
+}
+.prose .callout-icon:hover {
+  background-color: var(--color-bg-muted);
+}
+.prose .callout-body {
+  flex: 1;
+  min-width: 0;
+}
+.prose .callout-body > div > :last-child {
+  margin-bottom: 0;
+}
+
+/* Toggles */
+.prose [data-type="details"] {
+  display: flex;
+  gap: 0.25em;
+  margin-bottom: var(--editor-paragraph-spacing);
+}
+.prose [data-type="details"] > button {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5em;
+  height: 1.75em;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.prose [data-type="details"] > button:hover {
+  background-color: var(--color-bg-muted);
+}
+.prose [data-type="details"] > button::before {
+  content: "";
+  border-left: 0.4em solid currentColor;
+  border-top: 0.3em solid transparent;
+  border-bottom: 0.3em solid transparent;
+  transition: transform 0.15s;
+}
+.prose [data-type="details"].is-open > button::before {
+  transform: rotate(90deg);
+}
+.prose [data-type="details"] > div {
+  flex: 1;
+  min-width: 0;
+}
+.prose [data-type="details"] > div > summary {
+  display: block;
+  font-weight: 500;
+}
+.prose [data-type="details"].is-open > div > summary {
+  margin-bottom: var(--editor-paragraph-spacing);
+}
+.prose [data-type="detailsContent"] > :last-child {
+  margin-bottom: 0;
+}
+
+/* Image resize handles, shown on hover */
+.prose [data-resize-handle] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  cursor: ew-resize;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.prose [data-resize-handle]::after {
+  content: "";
+  width: 4px;
+  height: 40px;
+  max-height: 40%;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.6);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
+}
+.prose [data-resize-container]:hover [data-resize-handle],
+.prose [data-resize-state="true"] [data-resize-handle] {
+  opacity: 1;
+}
+.prose [data-resize-container].ProseMirror-selectednode img {
+  outline: 2px solid var(--color-selection);
+}
+
+/* File cards */
+.prose .file-card {
+  margin-bottom: var(--editor-paragraph-spacing);
+}
+.prose .file-card button {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  width: 100%;
+  padding: 0.6em 0.8em;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+}
+.prose .file-card button:hover {
+  background-color: var(--color-bg-muted);
+}
+.prose .file-card.ProseMirror-selectednode button {
+  outline: 2px solid var(--color-selection);
+}
+.prose .file-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prose .file-card-size {
+  margin-left: auto;
+  font-size: 0.85em;
+  color: var(--color-text-muted);
+}
+
 /* Search match highlighting - uses the selection color */
 .search-match {
   background-color: color-mix(in srgb, var(--color-selection), transparent 50%);
@@ -1082,13 +1214,15 @@ table.not-prose th {
     animation: none !important;
   }
 
-  /* Force white background and black text for printing - only for visible content */
+  /* Force white background and black text for printing - only for visible
+     content, keeping highlights and text colors. :where keeps the
+     specificity of `.prose *`, so the code block rules below still win. */
   body,
   #root,
   .prose,
-  .prose *,
+  .prose :where(:not(mark, span[style*="color"])),
   .ProseMirror,
-  .ProseMirror * {
+  .ProseMirror :where(:not(mark, span[style*="color"])) {
     background: white !important;
     color: black !important;
     box-shadow: none !important;
@@ -1135,12 +1269,6 @@ table.not-prose th {
   nav,
   header,
   footer {
-    display: none !important;
-  }
-
-  /* Hide toolbar and format bar when printing */
-  [data-tauri-drag-region],
-  [data-format-bar] {
     display: none !important;
   }
 
@@ -1277,11 +1405,42 @@ table.not-prose th {
     display: none !important;
   }
 
+  /* Callout icons and file cards are buttons on screen; keep them on paper */
+  .prose .callout {
+    border: 1px solid #d0d0d0 !important;
+    break-inside: avoid;
+  }
+  .prose .callout-icon {
+    display: block !important;
+  }
+  .prose .file-card button {
+    display: flex !important;
+    border: 1px solid #d0d0d0 !important;
+  }
+  .prose [data-resize-handle] {
+    display: none !important;
+  }
+
+  .prose [data-type="details"] > div > summary {
+    margin-bottom: var(--editor-paragraph-spacing);
+  }
+
   /* Ensure images fit on page */
   img {
     max-width: 100% !important;
     page-break-inside: avoid;
     break-inside: avoid;
+  }
+}
+
+/* Paper cannot be expanded later, so collapsed toggles print open. This sits
+   in the base layer because Tailwind's preflight hides [hidden] with an
+   !important there, which beats any unlayered rule. */
+@layer base {
+  @media print {
+    .prose [data-type="detailsContent"][hidden] {
+      display: block !important;
+    }
   }
 }
 

@@ -1,0 +1,173 @@
+import { useId, useState } from "react";
+import { useNotes } from "../../context/NotesContext";
+import {
+  errorMessage,
+  importNotion,
+  type NotionImportSummary,
+} from "../../services/export";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  Button,
+  Select,
+} from "../ui";
+
+type Status =
+  | { step: "ready"; error?: string }
+  | { step: "importing"; current: number; total: number }
+  | { step: "done"; summary: NotionImportSummary };
+
+function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+function summaryText({ pages, images, files, folder }: NotionImportSummary) {
+  return `Imported ${count(pages, "page")}, ${count(images, "image")} and ${count(files, "file")} into "${folder}"`;
+}
+
+interface NotionImportDialogProps {
+  /** The zips of the export. */
+  paths: string[];
+  /** Existing folders the user can import into. */
+  folders: string[];
+  onClose: () => void;
+}
+
+export function NotionImportDialog({
+  paths,
+  folders,
+  onClose,
+}: NotionImportDialogProps) {
+  const { refreshNotes } = useNotes();
+  const destinationId = useId();
+  // "" stands for a new `Notion Import` folder.
+  const [folder, setFolder] = useState("");
+  const [status, setStatus] = useState<Status>({ step: "ready" });
+  const importing = status.step === "importing";
+
+  const handleImport = async () => {
+    setStatus({ step: "importing", current: 0, total: 0 });
+    try {
+      const summary = await importNotion(
+        paths,
+        folder || null,
+        (current, total) =>
+          setStatus((s) =>
+            s.step === "importing" ? { step: "importing", current, total } : s,
+          ),
+      );
+      setStatus({ step: "done", summary });
+    } catch (error) {
+      setStatus({
+        step: "ready",
+        error: errorMessage(error, "Failed to import the Notion export"),
+      });
+    }
+    // A failed import can still have written some notes.
+    await refreshNotes();
+  };
+
+  return (
+    <AlertDialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !importing) onClose();
+      }}
+    >
+      <AlertDialogContent className="max-w-lg">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Import from Notion</AlertDialogTitle>
+          <AlertDialogDescription>
+            {status.step === "done"
+              ? summaryText(status.summary)
+              : "Notes, images and files from a Notion HTML export."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+
+        {status.step === "done" ? (
+          status.summary.skipped.length === 0 ? (
+            <p className="text-sm text-text-muted">Nothing was skipped.</p>
+          ) : (
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium text-text">
+                Skipped items ({status.summary.skipped.length})
+              </p>
+              <ul className="max-h-60 overflow-y-auto space-y-1.5 text-sm">
+                {status.summary.skipped.map((item, i) => (
+                  <li key={i} className="rounded-md bg-bg-muted px-2.5 py-1.5">
+                    <p className="font-mono text-2xs text-text-muted break-all">
+                      {item.page}
+                    </p>
+                    <p className="text-text">{item.reason}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        ) : (
+          <div className="space-y-3">
+            <ul className="space-y-0.5 text-sm text-text">
+              {paths.map((path) => (
+                <li key={path} className="truncate" title={path}>
+                  {path.split(/[\\/]/).pop()}
+                </li>
+              ))}
+            </ul>
+            <div className="space-y-1">
+              <label
+                htmlFor={destinationId}
+                className="text-sm font-medium text-text"
+              >
+                Destination
+              </label>
+              <Select
+                id={destinationId}
+                value={folder}
+                onChange={(e) => setFolder(e.target.value)}
+                disabled={importing}
+              >
+                <option value="">New folder: Notion Import</option>
+                {folders.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            {status.step === "importing" && (
+              <output className="block text-sm text-text-muted">
+                {status.total === 0
+                  ? "Reading the export..."
+                  : `Imported ${status.current} of ${status.total} pages`}
+              </output>
+            )}
+            {status.step === "ready" && status.error && (
+              <p className="text-sm text-red-500" role="alert">
+                {status.error}
+              </p>
+            )}
+          </div>
+        )}
+
+        <AlertDialogFooter>
+          {status.step === "done" ? (
+            <AlertDialogAction>Done</AlertDialogAction>
+          ) : (
+            <>
+              <AlertDialogCancel disabled={importing}>Cancel</AlertDialogCancel>
+              <Button onClick={handleImport} disabled={importing}>
+                {importing ? "Importing..." : "Import"}
+              </Button>
+            </>
+          )}
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}

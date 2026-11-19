@@ -16,6 +16,13 @@ import {
   XIcon,
 } from "../icons";
 import type { Settings } from "../../types/note";
+import {
+  exportFolderZip,
+  importZip,
+  pickNotionZips,
+} from "../../services/export";
+import { listFolders } from "../../services/notes";
+import { NotionImportDialog } from "./NotionImportDialog";
 
 // Format remote URL for display - extract user/repo from full URL
 function formatRemoteUrl(url: string | null): string {
@@ -66,7 +73,7 @@ function formatPath(path: string | null): string {
 }
 
 export function GeneralSettingsSection() {
-  const { notesFolder, setNotesFolder } = useNotes();
+  const { notesFolder, setNotesFolder, refreshNotes } = useNotes();
   const { reloadSettings } = useTheme();
   const {
     status,
@@ -91,6 +98,10 @@ export function GeneralSettingsSection() {
   const [isEditingRemote, setIsEditingRemote] = useState(false);
   const [noteTemplate, setNoteTemplate] = useState<string>("Untitled");
   const [previewNoteName, setPreviewNoteName] = useState<string>("Untitled");
+  const [notionImport, setNotionImport] = useState<{
+    paths: string[];
+    folders: string[];
+  } | null>(null);
   // Load template from settings on mount
   useEffect(() => {
     const loadTemplate = async () => {
@@ -167,6 +178,18 @@ export function GeneralSettingsSection() {
       console.error("Failed to open folder:", err);
       toast.error("Failed to open folder");
     }
+  };
+
+  const handleImportZip = async () => {
+    if (await importZip()) await refreshNotes();
+  };
+
+  const handleImportNotion = async () => {
+    const paths = await pickNotionZips();
+    if (!paths?.length) return;
+    // Without the folder list, the default new folder is still offered.
+    const folders = await listFolders().catch(() => []);
+    setNotionImport({ paths, folders });
   };
 
   const handleAddRemote = async () => {
@@ -283,6 +306,57 @@ export function GeneralSettingsSection() {
           )}
         </div>
       </section>
+
+      {notesFolder && (
+        <>
+          <div className="border-t border-border border-dashed" />
+
+          <section className="pb-2">
+            <h2 className="text-xl font-medium mb-0.5">Export and Import</h2>
+            <p className="text-sm text-text-muted mb-4">
+              Save every note and asset as a zip, or unpack an Aether zip or a
+              Notion export into this folder. Existing files are never
+              overwritten.
+            </p>
+            <div className="flex items-center gap-1">
+              <Button
+                onClick={() =>
+                  void exportFolderZip(
+                    "",
+                    notesFolder.split(/[\\/]/).filter(Boolean).pop() ?? "Notes",
+                  )
+                }
+                variant="outline"
+                size="md"
+              >
+                Export Workspace
+              </Button>
+              <Button
+                onClick={handleImportZip}
+                variant="ghost"
+                size="md"
+                className="text-text"
+              >
+                Import Zip
+              </Button>
+              <Button
+                onClick={handleImportNotion}
+                variant="ghost"
+                size="md"
+                className="text-text"
+              >
+                Import from Notion
+              </Button>
+            </div>
+            {notionImport && (
+              <NotionImportDialog
+                {...notionImport}
+                onClose={() => setNotionImport(null)}
+              />
+            )}
+          </section>
+        </>
+      )}
 
       {/* Divider */}
       <div className="border-t border-border border-dashed" />

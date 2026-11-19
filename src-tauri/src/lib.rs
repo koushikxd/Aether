@@ -16,7 +16,14 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+mod export;
 mod git;
+mod notion_import;
+mod relink;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod tests;
 
 // Note metadata for list display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +239,30 @@ impl SearchIndex {
         let mut writer = self.writer.lock().expect("search writer mutex");
         let id_term = tantivy::Term::from_field_text(self.id_field, id);
         writer.delete_term(id_term);
+        writer.commit()?;
+        Ok(())
+    }
+
+    /// Moves the entries of notes that moved to their new ids, in one commit.
+    fn reindex(&self, notes_root: &Path, notes: &[relink::Moved]) -> Result<()> {
+        let mut writer = self.writer.lock().expect("search writer mutex");
+        for note in notes {
+            let old_id = note.old_path.strip_suffix(".md").unwrap_or(&note.old_path);
+            let id = note.new_path.strip_suffix(".md").unwrap_or(&note.new_path);
+            writer.delete_term(tantivy::Term::from_field_text(self.id_field, old_id));
+            let modified = std::fs::metadata(dir_from_id(notes_root, &note.new_path))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            writer.add_document(doc!(
+                self.id_field => id,
+                self.title_field => extract_title(&note.markdown),
+                self.content_field => note.markdown.as_str(),
+                self.modified_field => modified,
+            ))?;
+        }
         writer.commit()?;
         Ok(())
     }
@@ -631,11 +662,21 @@ fn get_effective_ignored_dirs(settings: &Settings) -> Vec<String> {
     })
 }
 
+/// An app folder. Compared without case, because on a case-insensitive file
+/// system `Assets/` is the `assets/` folder.
+fn is_reserved_dir(name: &str) -> bool {
+    EXCLUDED_DIRS.iter().any(|d| d.eq_ignore_ascii_case(name))
+}
+
+/// A folder that holds no notes: an app folder or a user-ignored one.
+fn is_hidden_dir(name: &str, ignored_dirs: &[String]) -> bool {
+    is_reserved_dir(name) || ignored_dirs.iter().any(|d| d == name)
+}
+
 /// Filter for WalkDir: skips excluded and user-ignored directories.
 fn is_visible_notes_entry(entry: &walkdir::DirEntry, ignored_dirs: &[String]) -> bool {
     if entry.file_type().is_dir() {
-        let name = entry.file_name().to_str().unwrap_or("");
-        return !EXCLUDED_DIRS.contains(&name) && !ignored_dirs.iter().any(|d| d == name);
+        return !is_hidden_dir(entry.file_name().to_str().unwrap_or(""), ignored_dirs);
     }
     true
 }
@@ -650,7 +691,7 @@ fn id_from_abs_path(notes_root: &Path, file_path: &Path, ignored_dirs: &[String]
     for component in rel.parent().unwrap_or(Path::new("")).components() {
         if let std::path::Component::Normal(name) = component {
             let name_str = name.to_str()?;
-            if EXCLUDED_DIRS.contains(&name_str) || ignored_dirs.iter().any(|d| d == name_str) {
+            if is_hidden_dir(name_str, ignored_dirs) {
                 return None;
             }
         }
@@ -777,6 +818,155 @@ fn save_settings(notes_folder: &str, settings: &Settings) -> Result<()> {
     let content = serde_json::to_string_pretty(settings)?;
     std::fs::write(path, content)?;
     Ok(())
+}
+
+/// Rewrites links across the notes folder after `moves`, off the async
+/// runtime, and re-indexes the notes that moved. The file watcher re-indexes
+/// the other notes whose links changed.
+async fn relink_and_reindex(state: &AppState, notes_root: &Path, moves: Vec<relink::Move>) {
+    let root = notes_root.to_path_buf();
+    let ignored = ignored_dirs(state);
+    let moved = match tauri::async_runtime::spawn_blocking(move || {
+        relink::relink_notes(&root, &moves, &ignored)
+    })
+    .await
+    {
+        Ok(moved) => moved,
+        Err(e) => {
+            eprintln!("Failed to update links after a move: {e}");
+            return;
+        }
+    };
+    if let Some(index) = state.search_index.lock().expect("search index mutex").as_ref() {
+        if let Err(e) = index.reindex(notes_root, &moved) {
+            eprintln!("Failed to update the search index after a move: {e}");
+        }
+    }
+}
+
+/// The folder at note id or folder path `rel`.
+fn dir_from_id(notes_root: &Path, rel: &str) -> PathBuf {
+    notes_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
+/// The sub-page folder of note `id` (`Page/` next to `Page.md`), when it has
+/// one. App and ignored folders never are one, and the name must match
+/// exactly, as in the sidebar: on a case-insensitive file system `page/` is a
+/// plain folder next to `Page.md`.
+fn sub_page_dir(notes_root: &Path, id: &str, ignored_dirs: &[String]) -> Option<PathBuf> {
+    let dir = dir_from_id(notes_root, id);
+    let name = dir.file_name()?;
+    if !dir.is_dir() || is_hidden_dir(&name.to_string_lossy(), ignored_dirs) {
+        return None;
+    }
+    let mut siblings = std::fs::read_dir(dir.parent()?).ok()?;
+    siblings
+        .any(|entry| entry.is_ok_and(|e| e.file_name() == name))
+        .then_some(dir)
+}
+
+/// Whether note `id` would take the name of an existing note, or of a folder
+/// it would then pass off as its sub-pages. `own` holds the renamed note's
+/// file and sub-page folder, which a case-only rename finds under the new
+/// name on a case-insensitive file system.
+fn note_name_taken(notes_root: &Path, id: &str, own: &[&Path]) -> bool {
+    let Ok(file) = abs_path_from_id(notes_root, id) else {
+        return false;
+    };
+    [file, dir_from_id(notes_root, id)].iter().any(|path| {
+        path.exists() && !own.iter().any(|o| same_file::is_same_file(path, o).unwrap_or(false))
+    })
+}
+
+/// Renames page file `from` to `to` and its sub-page folder, the folder
+/// first. When the file cannot follow, the folder goes back, so a failure
+/// leaves both where they were.
+fn rename_page(from: &Path, to: &Path, sub_pages: Option<(&Path, &Path)>) -> std::io::Result<()> {
+    if let Some((dir_from, dir_to)) = sub_pages {
+        rename_path(dir_from, dir_to)?;
+    }
+    rename_path(from, to).inspect_err(|_| {
+        if let Some((dir_from, dir_to)) = sub_pages {
+            let _ = rename_path(dir_to, dir_from);
+        }
+    })
+}
+
+/// `std::fs::rename`, through a temporary name when only the case changes,
+/// which some case-insensitive file systems need.
+fn rename_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    let case_only = from != to
+        && from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+    if !case_only {
+        return std::fs::rename(from, to);
+    }
+    let mut temp = to.as_os_str().to_owned();
+    temp.push(".aether-rename");
+    std::fs::rename(from, &temp)?;
+    std::fs::rename(&temp, to).inspect_err(|_| {
+        let _ = std::fs::rename(&temp, from);
+    })
+}
+
+/// Removes `folder` when it is an empty sub-page folder, so its page becomes
+/// a plain note again. Plain folders stay, even when empty.
+fn remove_empty_sub_page_dir(notes_root: &Path, folder: &str) {
+    let is_page = !folder.is_empty()
+        && abs_path_from_id(notes_root, folder).is_ok_and(|page| page.is_file());
+    if is_page {
+        // Fails, and keeps the folder, while anything is left in it.
+        let _ = std::fs::remove_dir(dir_from_id(notes_root, folder));
+    }
+}
+
+fn parent_folder(id: &str) -> &str {
+    id.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+/// Where note `id` is after `moves`.
+fn moved_id(id: &str, moves: &[relink::Move]) -> String {
+    let path = relink::after_moves(&format!("{id}.md"), moves);
+    path.strip_suffix(".md").unwrap_or(&path).to_string()
+}
+
+/// Points pinned ids and cached notes at their new ids after `moves`.
+fn follow_moved_ids(state: &AppState, notes_folder: &str, moves: &[relink::Move]) {
+    {
+        let mut settings = state.settings.write().expect("settings write lock");
+        if let Some(ref mut pinned) = settings.pinned_note_ids {
+            let followed: Vec<String> = pinned.iter().map(|id| moved_id(id, moves)).collect();
+            if followed != *pinned {
+                *pinned = followed;
+                let _ = save_settings(notes_folder, &settings);
+            }
+        }
+    }
+    let mut cache = state.notes_cache.write().expect("cache write lock");
+    *cache = cache
+        .drain()
+        .map(|(id, mut meta)| {
+            meta.id = moved_id(&id, moves);
+            (meta.id.clone(), meta)
+        })
+        .collect();
+}
+
+/// Drops every note under `folder/` from the search index and cache.
+fn forget_notes_under(state: &AppState, folder: &str) {
+    let prefix = format!("{}/", folder);
+    {
+        let index = state.search_index.lock().expect("search index mutex");
+        if let Some(ref search_index) = *index {
+            let cache = state.notes_cache.read().expect("cache read lock");
+            for note_id in cache.keys() {
+                if note_id.starts_with(&prefix) {
+                    let _ = search_index.delete_note(note_id);
+                }
+            }
+        }
+    }
+    let mut cache = state.notes_cache.write().expect("cache write lock");
+    cache.retain(|id, _| !id.starts_with(&prefix));
 }
 
 // Clean up old entries from debounce map (entries older than 5 seconds)
@@ -1058,11 +1248,17 @@ async fn save_note(
         if existing_id != desired_id {
             let mut new_id = desired_id.clone();
             let mut counter = 1;
+            let ignored = ignored_dirs(&state);
+            let sub_pages = sub_page_dir(&folder_path, &existing_id, &ignored);
+            let own: Vec<&Path> = [Some(old_file_path.as_path()), sub_pages.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+            // A page named like a folder the scanner skips would hide its sub-pages there
+            let hidden = |id: &str| is_hidden_dir(id.rsplit('/').next().unwrap_or(id), &ignored);
 
             while new_id != existing_id
-                && abs_path_from_id(&folder_path, &new_id)
-                    .map(|p| p.exists())
-                    .unwrap_or(false)
+                && (hidden(&new_id) || note_name_taken(&folder_path, &new_id, &own))
             {
                 new_id = if let Some(ref prefix) = dir_prefix {
                     format!("{}/{}-{}", prefix, sanitized_leaf, counter)
@@ -1072,8 +1268,12 @@ async fn save_note(
                 counter += 1;
             }
 
-            let new_file_path = abs_path_from_id(&folder_path, &new_id)?;
-            (new_id, new_file_path, Some((existing_id, old_file_path)))
+            if new_id == existing_id {
+                (existing_id, old_file_path, None)
+            } else {
+                let new_file_path = abs_path_from_id(&folder_path, &new_id)?;
+                (new_id, new_file_path, Some((existing_id, old_file_path, sub_pages)))
+            }
         } else {
             (existing_id, old_file_path, None)
         }
@@ -1082,10 +1282,7 @@ async fn save_note(
         let mut new_id = sanitized_leaf.clone();
         let mut counter = 1;
 
-        while abs_path_from_id(&folder_path, &new_id)
-            .map(|p| p.exists())
-            .unwrap_or(false)
-        {
+        while note_name_taken(&folder_path, &new_id, &[]) {
             new_id = format!("{}-{}", sanitized_leaf, counter);
             counter += 1;
         }
@@ -1094,17 +1291,33 @@ async fn save_note(
         (new_id, new_file_path, None)
     };
 
-    // Write the file to the new path
-    fs::write(&file_path, &content)
+    // A rename saves in place first, so a failed rename loses no edits
+    let write_path = old_id.as_ref().map_or(&file_path, |(_, old_path, _)| old_path);
+    fs::write(write_path, &content)
         .await
         .map_err(|e| e.to_string())?;
 
-    // Delete old file AFTER successful write (to prevent data loss)
-    if let Some((_, ref old_file_path)) = old_id {
-        if old_file_path.exists() && *old_file_path != file_path {
-            let _ = fs::remove_file(old_file_path).await;
+    // A rename can rewrite links in this note too (links to itself)
+    let content = if let Some((ref old_id_str, ref old_file_path, ref sub_pages)) = old_id {
+        let new_dir = dir_from_id(&folder_path, &final_id);
+        rename_page(
+            old_file_path,
+            &file_path,
+            sub_pages.as_deref().map(|dir| (dir, new_dir.as_path())),
+        )
+        .map_err(|e| format!("Could not rename the note: {e}"))?;
+        let mut moves = vec![(format!("{}.md", old_id_str), format!("{}.md", final_id))];
+        if sub_pages.is_some() {
+            moves.push((old_id_str.clone(), final_id.clone()));
         }
-    }
+        follow_moved_ids(&state, &folder, &moves);
+        relink_and_reindex(&state, &folder_path, moves).await;
+        fs::read_to_string(&file_path)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        content
+    };
 
     let metadata = fs::metadata(&file_path)
         .await
@@ -1116,21 +1329,12 @@ async fn save_note(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // Update search index (delete old entry if renamed, then add new)
-    {
+    // A rename re-indexed the note with the notes that moved along
+    if old_id.is_none() {
         let index = state.search_index.lock().expect("search index mutex");
         if let Some(ref search_index) = *index {
-            if let Some((ref old_id_str, _)) = old_id {
-                let _ = search_index.delete_note(old_id_str);
-            }
             let _ = search_index.index_note(&final_id, &title, &content, modified);
         }
-    }
-
-    // Update cache (remove old entry if renamed)
-    if let Some((ref old_id_str, _)) = old_id {
-        let mut cache = state.notes_cache.write().expect("cache write lock");
-        cache.remove(old_id_str);
     }
 
     Ok(Note {
@@ -1154,11 +1358,21 @@ async fn delete_note(id: String, state: State<'_, AppState>) -> Result<(), Strin
 
     let folder_path = PathBuf::from(&folder);
     let file_path = abs_path_from_id(&folder_path, &id)?;
-    if file_path.exists() {
+    let existed = file_path.exists();
+    if existed {
         fs::remove_file(&file_path)
             .await
             .map_err(|e| e.to_string())?;
     }
+    // A page takes its sub-pages with it. Without the page file, the folder
+    // is a plain one and stays.
+    if let Some(sub_pages) = sub_page_dir(&folder_path, &id, &ignored_dirs(&state)).filter(|_| existed) {
+        forget_notes_under(&state, &id);
+        fs::remove_dir_all(&sub_pages)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    remove_empty_sub_page_dir(&folder_path, parent_folder(&id));
 
     // Update search index
     {
@@ -1177,6 +1391,41 @@ async fn delete_note(id: String, state: State<'_, AppState>) -> Result<(), Strin
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubPageCounts {
+    sub_pages: usize,
+    other_files: usize,
+}
+
+/// What deleting note `id` takes along: the notes and the other files in its
+/// sub-page folder.
+#[tauri::command]
+async fn sub_page_counts(id: String, state: State<'_, AppState>) -> Result<SubPageCounts, String> {
+    let root = PathBuf::from(notes_folder(&state)?);
+    abs_path_from_id(&root, &id)?;
+    let ignored = ignored_dirs(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut counts = SubPageCounts { sub_pages: 0, other_files: 0 };
+        let Some(dir) = sub_page_dir(&root, &id, &ignored) else {
+            return counts;
+        };
+        for entry in walkdir::WalkDir::new(dir).into_iter().flatten() {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if id_from_abs_path(&root, entry.path(), &ignored).is_some() {
+                counts.sub_pages += 1;
+            } else {
+                counts.other_files += 1;
+            }
+        }
+        counts
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) -> Result<Note, String> {
     let folder = {
@@ -1187,6 +1436,18 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
             .ok_or("Notes folder not set")?
     };
     let folder_path = PathBuf::from(&folder);
+
+    // A sub-page of a page named like a skipped folder would not show
+    let ignored = ignored_dirs(&state);
+    if let Some(hidden) = target_folder
+        .iter()
+        .flat_map(|f| f.split('/'))
+        .find(|dir| is_hidden_dir(dir, &ignored))
+    {
+        return Err(format!(
+            "The sidebar hides notes in a folder named \"{hidden}\". Rename the page first."
+        ));
+    }
 
     // Get template from settings (default "Untitled")
     let template = {
@@ -1226,10 +1487,7 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
     let mut counter = if has_counter { 2 } else { 1 };
 
     // Ensure filename uniqueness
-    while abs_path_from_id(&folder_path, &final_id)
-        .map(|p| p.exists())
-        .unwrap_or(false)
-    {
+    while note_name_taken(&folder_path, &final_id, &[]) {
         if has_counter {
             final_id = sanitized.replace("{counter}", &counter.to_string());
         } else {
@@ -1278,8 +1536,6 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
 }
 
 /// Validate a relative folder path against traversal attacks
-const RESERVED_FOLDER_NAMES: &[&str] = &[".git", ".aether", ".obsidian", ".trash", "assets"];
-
 fn validate_folder_path(path: &str) -> Result<(), String> {
     if path.contains('\\') {
         return Err("Invalid path: backslashes not allowed".to_string());
@@ -1301,7 +1557,7 @@ fn validate_folder_path(path: &str) -> Result<(), String> {
             }
             std::path::Component::Normal(name) => {
                 if let Some(name_str) = name.to_str() {
-                    if RESERVED_FOLDER_NAMES.contains(&name_str) {
+                    if is_reserved_dir(name_str) {
                         return Err(format!("'{}' is a reserved folder name", name_str));
                     }
                 }
@@ -1400,30 +1656,12 @@ async fn delete_folder(path: String, state: State<'_, AppState>) -> Result<(), S
         return Err("Path is not a directory".to_string());
     }
 
-    // Remove notes from search index
-    {
-        let index = state.search_index.lock().expect("search index mutex");
-        if let Some(ref search_index) = *index {
-            let cache = state.notes_cache.read().expect("cache read lock");
-            let prefix = format!("{}/", path);
-            for note_id in cache.keys() {
-                if note_id.starts_with(&prefix) {
-                    let _ = search_index.delete_note(note_id);
-                }
-            }
-        }
-    }
-
-    // Remove notes from cache
-    {
-        let mut cache = state.notes_cache.write().expect("cache write lock");
-        let prefix = format!("{}/", path);
-        cache.retain(|id, _| !id.starts_with(&prefix));
-    }
+    forget_notes_under(&state, &path);
 
     fs::remove_dir_all(&target)
         .await
         .map_err(|e| e.to_string())?;
+    remove_empty_sub_page_dir(Path::new(&folder), parent_folder(&path));
 
     Ok(())
 }
@@ -1523,17 +1761,7 @@ async fn rename_folder(
         }
     }
 
-    // Rebuild search index for affected notes
-    {
-        let index = state.search_index.lock().expect("search index mutex");
-        if let Some(ref search_index) = *index {
-            let ignored_dirs = {
-                let settings = state.settings.read().expect("settings read lock");
-                get_effective_ignored_dirs(&settings)
-            };
-            let _ = search_index.rebuild_index(&folder_root, &ignored_dirs);
-        }
-    }
+    relink_and_reindex(&state, &folder_root, vec![(old_path, new_path)]).await;
 
     Ok(())
 }
@@ -1572,8 +1800,13 @@ async fn move_note(
     if new_id == id {
         return Ok(id);
     }
+    if target_folder == id || target_folder.starts_with(&format!("{}/", id)) {
+        return Err("Cannot move a page into its own sub-pages".to_string());
+    }
 
     let dest_path = abs_path_from_id(&folder_root, &new_id)?;
+    let sub_pages = sub_page_dir(&folder_root, &id, &ignored_dirs(&state));
+    let sub_pages_dest = dir_from_id(&folder_root, &new_id);
 
     // Ensure target directory exists
     if let Some(parent) = dest_path.parent() {
@@ -1581,47 +1814,25 @@ async fn move_note(
     }
 
     // Handle collision
-    if dest_path.exists() {
+    if note_name_taken(&folder_root, &new_id, &[]) {
         return Err("A note with that name already exists in the target folder".to_string());
     }
 
-    tokio::fs::rename(&source_path, &dest_path)
-        .await
-        .map_err(|e| e.to_string())?;
+    rename_page(
+        &source_path,
+        &dest_path,
+        sub_pages.as_deref().map(|dir| (dir, sub_pages_dest.as_path())),
+    )
+    .map_err(|e| e.to_string())?;
 
-    // Update pinned note IDs
-    {
-        let mut settings = state.settings.write().expect("settings write lock");
-        if let Some(ref mut pinned) = settings.pinned_note_ids {
-            for pin_id in pinned.iter_mut() {
-                if *pin_id == id {
-                    *pin_id = new_id.clone();
-                }
-            }
-        }
-        let _ = save_settings(&folder, &settings);
+    let mut moves = vec![(format!("{}.md", id), format!("{}.md", new_id))];
+    if sub_pages.is_some() {
+        moves.push((id.clone(), new_id.clone()));
     }
+    remove_empty_sub_page_dir(&folder_root, parent_folder(&id));
 
-    // Update cache
-    {
-        let mut cache = state.notes_cache.write().expect("cache write lock");
-        if let Some(mut meta) = cache.remove(&id) {
-            meta.id = new_id.clone();
-            cache.insert(new_id.clone(), meta);
-        }
-    }
-
-    // Rebuild search index
-    {
-        let index = state.search_index.lock().expect("search index mutex");
-        if let Some(ref search_index) = *index {
-            let ignored_dirs = {
-                let settings = state.settings.read().expect("settings read lock");
-                get_effective_ignored_dirs(&settings)
-            };
-            let _ = search_index.rebuild_index(&folder_root, &ignored_dirs);
-        }
-    }
+    follow_moved_ids(&state, &folder, &moves);
+    relink_and_reindex(&state, &folder_root, moves).await;
 
     Ok(new_id)
 }
@@ -1693,6 +1904,7 @@ async fn move_folder(
     tokio::fs::rename(&source, &dest)
         .await
         .map_err(|e| e.to_string())?;
+    remove_empty_sub_page_dir(&folder_root, parent_folder(&path));
 
     // Update pinned note IDs
     {
@@ -1726,17 +1938,7 @@ async fn move_folder(
         }
     }
 
-    // Rebuild search index
-    {
-        let index = state.search_index.lock().expect("search index mutex");
-        if let Some(ref search_index) = *index {
-            let ignored_dirs = {
-                let settings = state.settings.read().expect("settings read lock");
-                get_effective_ignored_dirs(&settings)
-            };
-            let _ = search_index.rebuild_index(&folder_root, &ignored_dirs);
-        }
-    }
+    relink_and_reindex(&state, &folder_root, vec![(path, new_path)]).await;
 
     Ok(())
 }
@@ -2280,6 +2482,19 @@ fn copy_to_clipboard(app: AppHandle, text: String) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
+/// File extension for image bytes, judged by their leading signature.
+fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        [b'B', b'M', ..] => Some("bmp"),
+        [b'I', b'I', b'*', 0, ..] | [b'M', b'M', 0, b'*', ..] => Some("tiff"),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 async fn save_clipboard_image(
     base64_data: String,
@@ -2307,6 +2522,7 @@ async fn save_clipboard_image(
     if image_data.is_empty() {
         return Err("Decoded image data is empty".to_string());
     }
+    let extension = image_extension(&image_data).ok_or("Unsupported image type")?;
 
     // Create assets folder path
     let assets_dir = PathBuf::from(&folder).join("assets");
@@ -2320,12 +2536,12 @@ async fn save_clipboard_image(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut target_name = format!("screenshot-{}.png", timestamp);
+    let mut target_name = format!("screenshot-{}.{}", timestamp, extension);
     let mut counter = 1;
     let mut target_path = assets_dir.join(&target_name);
 
     while target_path.exists() {
-        target_name = format!("screenshot-{}-{}.png", timestamp, counter);
+        target_name = format!("screenshot-{}-{}.{}", timestamp, counter, extension);
         target_path = assets_dir.join(&target_name);
         counter += 1;
     }
@@ -2339,71 +2555,243 @@ async fn save_clipboard_image(
     Ok(format!("assets/{}", target_name))
 }
 
+fn notes_folder(state: &AppState) -> Result<String, String> {
+    let app_config = state.app_config.read().expect("app_config read lock");
+    app_config
+        .notes_folder
+        .clone()
+        .ok_or_else(|| "Notes folder not set".to_string())
+}
+
+/// The sanitized file name of `source` for `assets_dir`, with `-N` added
+/// while the name is taken.
+fn unique_asset_name(assets_dir: &Path, source: &Path) -> String {
+    let stem = sanitize_filename(source.file_stem().and_then(|n| n.to_str()).unwrap_or("file"));
+    let extension = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    let mut target_name = format!("{stem}{extension}");
+    let mut counter = 1;
+    while assets_dir.join(&target_name).exists() {
+        target_name = format!("{stem}-{counter}{extension}");
+        counter += 1;
+    }
+    target_name
+}
+
+/// Copies `source` into `<notes>/assets/` under its sanitized name, adding
+/// `-N` while the name is taken. Returns `assets/<name>`.
+async fn copy_into_assets(state: &AppState, source: &Path) -> Result<String, String> {
+    let assets_dir = PathBuf::from(notes_folder(state)?).join("assets");
+
+    fs::create_dir_all(&assets_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let target_name = unique_asset_name(&assets_dir, source);
+    fs::copy(source, assets_dir.join(&target_name))
+        .await
+        .map_err(|_| "Failed to copy file".to_string())?;
+    Ok(format!("assets/{target_name}"))
+}
+
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico", "avif",
+];
+
 #[tauri::command]
 async fn copy_image_to_assets(
     source_path: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-
     let source = PathBuf::from(&source_path);
     if !source.exists() {
         return Err("Source image file does not exist".to_string());
     }
 
-    // Get file extension
     let extension = source
         .extension()
         .and_then(|e| e.to_str())
         .ok_or("Invalid file extension")?;
 
-    const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &[
-        "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "tiff", "tif", "ico", "avif",
-    ];
-    let ext_lower = extension.to_lowercase();
-    if !ALLOWED_IMAGE_EXTENSIONS.contains(&ext_lower.as_str()) {
+    if !IMAGE_EXTENSIONS.contains(&extension.to_lowercase().as_str()) {
         return Err("Only image files can be copied to assets".to_string());
     }
 
-    // Get original filename (without extension)
-    let original_name = source
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or("image");
+    copy_into_assets(&state, &source).await
+}
 
-    // Sanitize the filename
-    let sanitized_name = sanitize_filename(original_name);
-
-    // Create assets folder path
-    let assets_dir = PathBuf::from(&folder).join("assets");
-    fs::create_dir_all(&assets_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Generate unique filename
-    let mut target_name = format!("{}.{}", sanitized_name, extension);
-    let mut counter = 1;
-    let mut target_path = assets_dir.join(&target_name);
-
-    while target_path.exists() {
-        target_name = format!("{}-{}.{}", sanitized_name, counter, extension);
-        target_path = assets_dir.join(&target_name);
-        counter += 1;
+/// Copies any file into the assets folder, for file attachments.
+#[tauri::command]
+async fn copy_file_to_assets(
+    source_path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let source = PathBuf::from(&source_path);
+    if !source.is_file() {
+        return Err("Only files can be attached".to_string());
     }
+    copy_into_assets(&state, &source).await
+}
 
-    // Copy the file
-    fs::copy(&source, &target_path)
+/// The real path of `path` when it resolves, through any symlinks, to a file
+/// in `<notes_root>/assets/`.
+fn asset_file(notes_root: &Path, path: &str) -> Result<PathBuf, String> {
+    let resolved = Path::new(path).canonicalize();
+    let assets = notes_root.join("assets").canonicalize();
+    match (resolved, assets) {
+        (Ok(path), Ok(assets)) if path.starts_with(&assets) && path.is_file() => Ok(path),
+        _ => Err("Not a file in the assets folder".to_string()),
+    }
+}
+
+/// Size in bytes of a file in `<notes>/assets/`, given its absolute path.
+#[tauri::command]
+async fn get_asset_size(path: String, state: State<'_, AppState>) -> Result<u64, String> {
+    let path = asset_file(Path::new(&notes_folder(&state)?), &path)?;
+    let meta = fs::metadata(&path).await.map_err(|e| e.to_string())?;
+    Ok(meta.len())
+}
+
+/// Extensions of files that the OS runs, or that point it at something to run,
+/// rather than opening them in an app.
+const EXECUTABLE_EXTENSIONS: &[&str] = &[
+    "exe", "com", "bat", "cmd", "msi", "msp", "scr", "pif", "cpl", "hta", "lnk", "url", "reg",
+    "vbs", "vbe", "js", "jse", "wsf", "wsh", "ps1", "psm1", "jar", "app", "command", "tool",
+    "terminal", "workflow", "action", "pkg", "mpkg", "sh", "bash", "zsh", "csh", "ksh", "fish",
+    "py", "pyw", "pl", "rb", "desktop", "appimage", "run",
+];
+
+/// Absolute `path` when it is a file in `<notes_root>/assets/` that the OS
+/// opens in an app rather than runs.
+fn openable_asset(notes_root: &Path, path: &str) -> Result<PathBuf, String> {
+    let path = asset_file(notes_root, path)?;
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if EXECUTABLE_EXTENSIONS.contains(&extension.as_str()) {
+        return Err("Aether won't open executable files. Reveal it in the folder instead.".to_string());
+    }
+    Ok(path)
+}
+
+/// Opens a file in `<notes>/assets/`, given its absolute path, in the OS's
+/// default app for it.
+#[tauri::command]
+async fn open_asset(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    let path = openable_asset(Path::new(&notes_folder(&state)?), &path)?;
+    tauri_plugin_opener::open_path(&path, None::<&str>)
+        .map_err(|e| format!("Could not open the file: {e}"))
+}
+
+fn ignored_dirs(state: &AppState) -> Vec<String> {
+    get_effective_ignored_dirs(&state.settings.read().expect("settings read lock"))
+}
+
+/// Zips a folder of notes (`""` for the whole notes folder) to `dest`.
+#[tauri::command]
+async fn export_folder_zip(folder: String, dest: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !folder.is_empty() {
+        validate_folder_path(&folder)?;
+    }
+    let root = PathBuf::from(notes_folder(&state)?);
+    if !root.join(&folder).is_dir() {
+        return Err("Folder not found".to_string());
+    }
+    let ignored = ignored_dirs(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        export::export_folder(&root, &folder, &ignored, Path::new(&dest))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("Failed to export zip: {e}"))
+}
+
+/// Zips the note `id`, whose current content is `markdown`, with its assets.
+#[tauri::command]
+async fn export_note_zip(
+    id: String,
+    markdown: String,
+    dest: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let root = PathBuf::from(notes_folder(&state)?);
+    abs_path_from_id(&root, &id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        export::export_note(&root, &id, &markdown, Path::new(&dest))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("Failed to export zip: {e}"))
+}
+
+/// Unpacks an exported zip into the notes folder; returns the number of files written.
+#[tauri::command]
+async fn import_zip(path: String, state: State<'_, AppState>) -> Result<usize, String> {
+    let root = PathBuf::from(notes_folder(&state)?);
+    tauri::async_runtime::spawn_blocking(move || export::import(&root, Path::new(&path)))
         .await
-        .map_err(|_| "Failed to copy image".to_string())?;
+        .map_err(|e| e.to_string())?
+}
 
-    // Return both relative path and filename for frontend to construct the URL
-    Ok(format!("assets/{}", target_name))
+#[derive(Clone, Serialize)]
+struct NotionImportProgress {
+    current: usize,
+    total: usize,
+}
+
+/// Imports Notion HTML export zips (the parts of one export) into `folder`,
+/// or into a new `Notion Import` folder. Emits `notion-import-progress` after
+/// each note it writes.
+#[tauri::command]
+async fn import_notion(
+    app: AppHandle,
+    paths: Vec<String>,
+    folder: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<notion_import::Summary, String> {
+    let root = PathBuf::from(notes_folder(&state)?);
+    let notes_root = root.clone();
+    let ignored = ignored_dirs(&state);
+    let summary = tauri::async_runtime::spawn_blocking(move || {
+        let zips: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        notion_import::import(&notes_root, &zips, folder.as_deref(), &ignored, |current, total| {
+            let _ = app.emit("notion-import-progress", NotionImportProgress { current, total });
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if let Some(index) = state.search_index.lock().expect("search index mutex").as_ref() {
+        let _ = index.rebuild_index(&root, &ignored_dirs(&state));
+    }
+    Ok(summary)
+}
+
+/// An image in the notes folder, given its path relative to it, as base64.
+#[tauri::command]
+async fn read_asset_base64(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let root = PathBuf::from(notes_folder(&state)?);
+    let rel = Path::new(&path);
+    if !rel
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err("Not a file in the notes folder".to_string());
+    }
+    let extension = rel
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+        return Err("Only images can be embedded".to_string());
+    }
+    let bytes = fs::read(root.join(rel))
+        .await
+        .map_err(|_| format!("Could not read {path}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 #[tauri::command]
@@ -3844,6 +4232,7 @@ pub fn run() {
             read_note,
             save_note,
             delete_note,
+            sub_page_counts,
             create_note,
             list_folders,
             create_folder,
@@ -3862,6 +4251,14 @@ pub fn run() {
             get_default_ignored_patterns,
             copy_to_clipboard,
             copy_image_to_assets,
+            copy_file_to_assets,
+            get_asset_size,
+            open_asset,
+            read_asset_base64,
+            export_folder_zip,
+            export_note_zip,
+            import_zip,
+            import_notion,
             save_clipboard_image,
             open_folder_dialog,
             open_in_file_manager,

@@ -5,6 +5,7 @@ import { useNotes } from "../../context/NotesContext";
 import {
   buildFolderTree,
   countNotesInFolder,
+  useDeleteNoteWarning,
   getVisibleItems,
   type TreeItem,
 } from "../../lib/folderTree";
@@ -33,8 +34,10 @@ import {
   PinIcon,
   CopyIcon,
   ArrowUpIcon,
+  DownloadIcon,
 } from "../icons";
 import * as notesService from "../../services/notes";
+import { exportFolderZip } from "../../services/export";
 import type { FolderNode, NoteMetadata, Settings } from "../../types/note";
 
 const STORAGE_KEY = "aether:collapsedFolders";
@@ -78,6 +81,10 @@ interface FileItemProps {
   onDuplicate: (id: string) => Promise<void>;
   onDelete: (id: string) => void;
   onMoveToParent?: (id: string, targetFolder: string) => void;
+  onNewSubPage: (id: string) => void;
+  /** Set only for a page with sub-pages: whether they are shown. */
+  subPagesExpanded?: boolean;
+  onToggleSubPages: (id: string) => void;
   focusedItemKey?: string | null;
 }
 
@@ -93,6 +100,9 @@ const FileItem = memo(function FileItem({
   onDuplicate,
   onDelete,
   onMoveToParent,
+  onNewSubPage,
+  subPagesExpanded,
+  onToggleSubPages,
   focusedItemKey,
 }: FileItemProps) {
   const itemRef = useRef<HTMLDivElement>(null);
@@ -117,9 +127,10 @@ const FileItem = memo(function FileItem({
     data: { type: "note", id: note.id },
   });
 
+  // Dropping onto a note makes the dropped item its sub-page
   const { setNodeRef: setDropRef, isOver } = useDroppable({
     id: `drop-note:${note.id}`,
-    data: { type: "folder", path: noteParentFolder },
+    data: { type: "folder", path: note.id },
   });
 
   useEffect(() => {
@@ -175,12 +186,33 @@ const FileItem = memo(function FileItem({
           onClick={handleClick}
           // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- a native button changes click focus (WebKit focuses the tree container instead, showing its focus ring) and makes Space activate the row
           role="button"
+          aria-expanded={subPagesExpanded}
           tabIndex={-1}
         >
+          {subPagesExpanded !== undefined && (
+            // oxlint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- mouse shortcut inside the row; the row itself carries aria-expanded
+            <span
+              data-sub-pages-toggle
+              aria-hidden="true"
+              className="shrink-0 rounded-sm hover:bg-bg-emphasis"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleSubPages(note.id);
+              }}
+            >
+              {subPagesExpanded ? (
+                <ChevronDownIcon className="w-4 h-4 stroke-[1.6] text-text-muted/60" />
+              ) : (
+                <ChevronRightIcon className="w-4 h-4 stroke-[1.6] text-text-muted/60" />
+              )}
+            </span>
+          )}
           {isPinned ? (
             <PinIcon className="w-4 h-4 stroke-[1.6] fill-current text-text-muted shrink-0" />
           ) : (
-            <NoteIcon className="w-4 h-4 stroke-[1.6] opacity-50 shrink-0" />
+            subPagesExpanded === undefined && (
+              <NoteIcon className="w-4 h-4 stroke-[1.6] opacity-50 shrink-0" />
+            )
           )}
           <span className="text-sm text-text truncate">
             {cleanTitle(note.title)}
@@ -189,6 +221,14 @@ const FileItem = memo(function FileItem({
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
         <ContextMenu.Content className="min-w-44 bg-bg border border-border rounded-md shadow-lg py-1 z-50">
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onNewSubPage(note.id)}
+          >
+            <AddNoteIcon className="w-4 h-4 stroke-[1.6]" />
+            New sub-page
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item className={menuItemClass} onSelect={handlePin}>
             <PinIcon className="w-4 h-4 stroke-[1.6]" />
             {isPinned ? "Unpin" : "Pin"}
@@ -252,9 +292,9 @@ const FileItem = memo(function FileItem({
   );
 });
 
-interface FolderItemProps {
-  folder: FolderNode;
-  depth: number;
+/** What every level of the tree passes down to the next. */
+interface TreeProps {
+  subPages: Map<string, FolderNode>;
   collapsedFolders: Set<string>;
   onToggleCollapse: (path: string) => void;
   selectedNoteId: string | null;
@@ -274,27 +314,79 @@ interface FolderItemProps {
   onMoveFolderToParent: (path: string, targetParent: string) => void;
 }
 
+interface FolderItemProps extends TreeProps {
+  folder: FolderNode;
+  depth: number;
+}
+
+/** A folder's subfolders and notes, at `depth`. */
+function FolderContents({ folder, depth, ...tree }: FolderItemProps) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      {folder.children.map((child) => (
+        <FolderItemComponent
+          key={child.path}
+          folder={child}
+          depth={depth}
+          {...tree}
+        />
+      ))}
+      {folder.notes.map((note) => (
+        <NoteItem key={note.id} note={note} depth={depth} {...tree} />
+      ))}
+    </div>
+  );
+}
+
+/** A note row, followed by its sub-pages when it is an expanded page. */
+function NoteItem({
+  note,
+  depth,
+  ...tree
+}: TreeProps & { note: NoteMetadata; depth: number }) {
+  const subPages = tree.subPages.get(note.id);
+  const expanded = subPages ? !tree.collapsedFolders.has(note.id) : undefined;
+  return (
+    <>
+      <FileItem
+        note={note}
+        depth={depth}
+        isSelected={tree.selectedNoteId === note.id}
+        isMultiSelected={tree.multiSelectedNoteIds.has(note.id)}
+        isPinned={tree.pinnedIds.has(note.id)}
+        onNoteClick={tree.onNoteClick}
+        onPin={tree.onPinNote}
+        onUnpin={tree.onUnpinNote}
+        onDuplicate={tree.onDuplicateNote}
+        onDelete={tree.onDeleteNote}
+        onMoveToParent={tree.onMoveNoteToParent}
+        onNewSubPage={tree.onCreateNoteHere}
+        subPagesExpanded={expanded}
+        onToggleSubPages={tree.onToggleCollapse}
+        focusedItemKey={tree.focusedItemKey}
+      />
+      {subPages && expanded && (
+        <FolderContents folder={subPages} depth={depth + 1} {...tree} />
+      )}
+    </>
+  );
+}
+
 const FolderItemComponent = memo(function FolderItem({
   folder,
   depth,
-  collapsedFolders,
-  onToggleCollapse,
-  selectedNoteId,
-  pinnedIds,
-  multiSelectedNoteIds,
-  onNoteClick,
-  focusedItemKey,
-  onCreateNoteHere,
-  onNewSubfolder,
-  onRenameFolder,
-  onDeleteFolder,
-  onPinNote,
-  onUnpinNote,
-  onDuplicateNote,
-  onDeleteNote,
-  onMoveNoteToParent,
-  onMoveFolderToParent,
+  ...tree
 }: FolderItemProps) {
+  const {
+    collapsedFolders,
+    onToggleCollapse,
+    focusedItemKey,
+    onCreateNoteHere,
+    onNewSubfolder,
+    onRenameFolder,
+    onDeleteFolder,
+    onMoveFolderToParent,
+  } = tree;
   const isCollapsed = collapsedFolders.has(folder.path);
   const noteCount = countNotesInFolder(folder);
   const isEmpty = noteCount === 0 && folder.children.length === 0;
@@ -355,48 +447,8 @@ const FolderItemComponent = memo(function FolderItem({
           </div>
 
           {!isCollapsed && (
-            <div className="flex flex-col gap-0.5">
-              {folder.children.map((child) => (
-                <FolderItemComponent
-                  key={child.path}
-                  folder={child}
-                  depth={depth + 1}
-                  collapsedFolders={collapsedFolders}
-                  onToggleCollapse={onToggleCollapse}
-                  selectedNoteId={selectedNoteId}
-                  focusedItemKey={focusedItemKey}
-                  pinnedIds={pinnedIds}
-                  multiSelectedNoteIds={multiSelectedNoteIds}
-                  onNoteClick={onNoteClick}
-                  onCreateNoteHere={onCreateNoteHere}
-                  onNewSubfolder={onNewSubfolder}
-                  onRenameFolder={onRenameFolder}
-                  onDeleteFolder={onDeleteFolder}
-                  onPinNote={onPinNote}
-                  onUnpinNote={onUnpinNote}
-                  onDuplicateNote={onDuplicateNote}
-                  onDeleteNote={onDeleteNote}
-                  onMoveNoteToParent={onMoveNoteToParent}
-                  onMoveFolderToParent={onMoveFolderToParent}
-                />
-              ))}
-              {folder.notes.map((note) => (
-                <FileItem
-                  key={note.id}
-                  note={note}
-                  depth={depth + 1}
-                  isSelected={selectedNoteId === note.id}
-                  isMultiSelected={multiSelectedNoteIds.has(note.id)}
-                  isPinned={pinnedIds.has(note.id)}
-                  onNoteClick={onNoteClick}
-                  onPin={onPinNote}
-                  onUnpin={onUnpinNote}
-                  onDuplicate={onDuplicateNote}
-                  onDelete={onDeleteNote}
-                  onMoveToParent={onMoveNoteToParent}
-                  focusedItemKey={focusedItemKey}
-                />
-              ))}
+            <>
+              <FolderContents folder={folder} depth={depth + 1} {...tree} />
               {isEmpty && (
                 <div
                   className="text-sm text-text-muted/50 py-1 select-none"
@@ -405,7 +457,7 @@ const FolderItemComponent = memo(function FolderItem({
                   Empty
                 </div>
               )}
-            </div>
+            </>
           )}
         </div>
       </ContextMenu.Trigger>
@@ -435,6 +487,13 @@ const FolderItemComponent = memo(function FolderItem({
           >
             <PencilIcon className="w-4 h-4 stroke-[1.6]" />
             Rename
+          </ContextMenu.Item>
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => void exportFolderZip(folder.path, folder.name)}
+          >
+            <DownloadIcon className="w-4 h-4 stroke-[1.6]" />
+            Export as Zip
           </ContextMenu.Item>
           {folder.path.includes("/") && (
             <>
@@ -524,6 +583,9 @@ export function FolderTreeView({
   const [subfolderParent, setSubfolderParent] = useState("");
   const [noteDeleteDialogOpen, setNoteDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
+  const deleteWarning = useDeleteNoteWarning(
+    noteDeleteDialogOpen ? noteToDelete : null,
+  );
   const [isDeleting, setIsDeleting] = useState(false);
   const [knownFolders, setKnownFolders] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -856,6 +918,27 @@ export function FolderTreeView({
     [tree.rootNotes, pinnedIds],
   );
 
+  const treeProps: TreeProps = {
+    subPages: tree.subPages,
+    collapsedFolders,
+    onToggleCollapse: handleToggleCollapse,
+    selectedNoteId,
+    focusedItemKey,
+    pinnedIds,
+    multiSelectedNoteIds,
+    onNoteClick: handleNoteClick,
+    onCreateNoteHere: createNoteInFolder,
+    onNewSubfolder: handleNewSubfolder,
+    onRenameFolder: handleRenameFolder,
+    onDeleteFolder: handleDeleteFolder,
+    onPinNote: pinNote,
+    onUnpinNote: unpinNote,
+    onDuplicateNote: duplicateNote,
+    onDeleteNote: openDeleteNoteDialog,
+    onMoveNoteToParent: moveNote,
+    onMoveFolderToParent: moveFolder,
+  };
+
   return (
     <>
       {/* oxlint-disable-next-line jsx-a11y/no-static-element-interactions -- focusable container that owns arrow/Enter/Escape navigation for the tree rows */}
@@ -870,20 +953,7 @@ export function FolderTreeView({
       >
         {/* Pinned root notes */}
         {pinnedRootNotes.map((note) => (
-          <FileItem
-            key={note.id}
-            note={note}
-            depth={0}
-            isSelected={selectedNoteId === note.id}
-            isMultiSelected={multiSelectedNoteIds.has(note.id)}
-            isPinned={true}
-            onNoteClick={handleNoteClick}
-            onPin={pinNote}
-            onUnpin={unpinNote}
-            onDuplicate={duplicateNote}
-            onDelete={openDeleteNoteDialog}
-            focusedItemKey={focusedItemKey}
-          />
+          <NoteItem key={note.id} note={note} depth={0} {...treeProps} />
         ))}
 
         {/* Folders */}
@@ -892,42 +962,13 @@ export function FolderTreeView({
             key={folder.path}
             folder={folder}
             depth={0}
-            collapsedFolders={collapsedFolders}
-            onToggleCollapse={handleToggleCollapse}
-            selectedNoteId={selectedNoteId}
-            focusedItemKey={focusedItemKey}
-            pinnedIds={pinnedIds}
-            multiSelectedNoteIds={multiSelectedNoteIds}
-            onNoteClick={handleNoteClick}
-            onCreateNoteHere={createNoteInFolder}
-            onNewSubfolder={handleNewSubfolder}
-            onRenameFolder={handleRenameFolder}
-            onDeleteFolder={handleDeleteFolder}
-            onPinNote={pinNote}
-            onUnpinNote={unpinNote}
-            onDuplicateNote={duplicateNote}
-            onDeleteNote={openDeleteNoteDialog}
-            onMoveNoteToParent={moveNote}
-            onMoveFolderToParent={moveFolder}
+            {...treeProps}
           />
         ))}
 
         {/* Unpinned root notes */}
         {unpinnedRootNotes.map((note) => (
-          <FileItem
-            key={note.id}
-            note={note}
-            depth={0}
-            isSelected={selectedNoteId === note.id}
-            isMultiSelected={multiSelectedNoteIds.has(note.id)}
-            isPinned={false}
-            onNoteClick={handleNoteClick}
-            onPin={pinNote}
-            onUnpin={unpinNote}
-            onDuplicate={duplicateNote}
-            onDelete={openDeleteNoteDialog}
-            focusedItemKey={focusedItemKey}
-          />
+          <NoteItem key={note.id} note={note} depth={0} {...treeProps} />
         ))}
       </div>
 
@@ -986,14 +1027,13 @@ export function FolderTreeView({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete note?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently delete the note and all its content. This
-              action cannot be undone.
+              {deleteWarning.text}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              disabled={isDeleting}
+              disabled={isDeleting || !deleteWarning.ready}
               onClick={(e) => {
                 e.preventDefault();
                 void handleNoteDeleteConfirm();

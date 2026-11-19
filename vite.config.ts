@@ -84,6 +84,9 @@ export default defineConfig(async () => ({
       "@tiptap/starter-kit",
       "@tiptap/markdown",
       "lowlight",
+      // Imported only by the E2E fake backend; listing it avoids a page reload
+      // when Vite discovers it mid-test.
+      "@tauri-apps/api/mocks",
     ],
   },
 }));

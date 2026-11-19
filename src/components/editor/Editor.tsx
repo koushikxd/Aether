@@ -16,11 +16,10 @@ import {
 import { StarterKit } from "@tiptap/starter-kit";
 import { Placeholder } from "@tiptap/extension-placeholder";
 import { Link } from "@tiptap/extension-link";
-import { Image } from "@tiptap/extension-image";
 import { TaskList } from "@tiptap/extension-task-list";
 import { TaskItem } from "@tiptap/extension-task-item";
 import { TableKit } from "@tiptap/extension-table";
-import { Markdown } from "@tiptap/markdown";
+import { Markdown, type MarkdownManager } from "@tiptap/markdown";
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
@@ -35,16 +34,19 @@ import {
 import tippy, { type Instance as TippyInstance } from "tippy.js";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { join } from "@tauri-apps/api/path";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { toast } from "sonner";
-import { mod, alt, shift, isMac, isWindows } from "../../lib/platform";
+import { mod, shift, isMac, isWindows } from "../../lib/platform";
 
-// Prepend https:// if no protocol is present
+// Prepend https:// if no protocol is present, except to relative links
+// (paths, anchors, and links to .md notes)
 function normalizeUrl(url: string): string {
   const trimmed = url.trim();
   if (!trimmed) return trimmed;
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return trimmed;
+  if (/^(?:\.{0,2}\/|#)/.test(trimmed)) return trimmed;
+  if (/\.md$/i.test(trimmed.split(/[?#]/)[0])) return trimmed;
   return `https://${trimmed}`;
 }
 
@@ -66,36 +68,49 @@ import { BlockMathEditor } from "./BlockMathEditor";
 import { LinkEditor } from "./LinkEditor";
 import { SearchToolbar } from "./SearchToolbar";
 import { SlashCommand } from "./SlashCommand";
+import { SelectionToolbar } from "./SelectionToolbar";
+import { BlockHandle } from "./BlockHandle";
+import { BlockShortcuts } from "./blocks";
+import { Callout } from "./Callout";
+import { Toggle, ToggleContent, ToggleSummary } from "./Toggle";
+import { FileCard } from "./FileCard";
+import { ResizableImage } from "./ResizableImage";
+import { ColorTextStyle, MarkHighlight } from "./marks";
+import { Color } from "@tiptap/extension-text-style";
 import { Wikilink } from "./Wikilink";
 import { getWikilinkStorage, WikilinkSuggestion } from "./WikilinkSuggestion";
 import { EditorWidthHandles } from "./EditorWidthHandle";
-import { AetherBlockMath, normalizeBlockMath } from "./MathExtensions";
+import {
+  AetherBlockMath,
+  AetherInlineMath,
+  EscapedDollar,
+  normalizeBlockMath,
+} from "./MathExtensions";
 import { cn } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
-import { Button, IconButton, ToolbarButton, Tooltip } from "../ui";
+import {
+  assetUrl,
+  changedTargets,
+  editorMarkdown,
+  IMAGE_EXTENSIONS,
+  isImagePath,
+  linkedNoteId,
+  noteHref,
+  withChangedTargets,
+  withDisplaySrcs,
+  type NoteLocation,
+} from "../../lib/assetPaths";
+import { Button, IconButton, Tooltip } from "../ui";
 import * as notesService from "../../services/notes";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
-import type { Settings } from "../../types/note";
 import {
-  BoldIcon,
-  ItalicIcon,
-  StrikethroughIcon,
-  Heading1Icon,
-  Heading2Icon,
-  Heading3Icon,
-  Heading4Icon,
-  ListIcon,
-  ListOrderedIcon,
-  CheckSquareIcon,
-  QuoteIcon,
-  CodeIcon,
-  InlineCodeIcon,
-  BlockMathIcon,
-  SeparatorIcon,
-  LinkIcon,
-  BracketsIcon,
-  ImageIcon,
-  TableIcon,
+  errorMessage,
+  exportNoteHtml,
+  exportNoteZip,
+  noteClipboardHtml,
+} from "../../services/export";
+import type { Note, Settings } from "../../types/note";
+import {
   SpinnerIcon,
   CircleCheckIcon,
   CopyIcon,
@@ -203,232 +218,6 @@ const SearchHighlight = Extension.create<SearchHighlightOptions>({
     ];
   },
 });
-
-// GridPicker component for table insertion
-interface GridPickerProps {
-  onSelect: (rows: number, cols: number) => void;
-}
-
-function GridPicker({ onSelect }: GridPickerProps) {
-  const [hovered, setHovered] = useState({ row: 3, col: 3 });
-
-  return (
-    <>
-      <div className="grid grid-cols-5 gap-1">
-        {Array.from({ length: 25 }).map((_, i) => {
-          const row = Math.floor(i / 5) + 1;
-          const col = (i % 5) + 1;
-          const isHighlighted = row <= hovered.row && col <= hovered.col;
-
-          return (
-            <button
-              key={i}
-              type="button"
-              aria-label={`${row} × ${col} table`}
-              className={cn(
-                "w-5.5 h-5.5 border rounded cursor-pointer transition-colors",
-                isHighlighted
-                  ? "bg-accent/20 border-accent/50"
-                  : "border-border hover:border-accent/50",
-              )}
-              onMouseEnter={() => setHovered({ row, col })}
-              onClick={() => onSelect(row, col)}
-            />
-          );
-        })}
-      </div>
-      <p className="text-xs text-center mt-2 text-text-muted">
-        {hovered.row} × {hovered.col} table
-      </p>
-    </>
-  );
-}
-
-interface FormatBarProps {
-  editor: TiptapEditor | null;
-  onAddLink: () => void;
-  onAddBlockMath: () => void;
-  onAddImage: () => void;
-}
-
-// FormatBar must re-render with parent to reflect editor.isActive() state changes
-// (editor instance is mutable, so memo would cause stale active states)
-function FormatBar({
-  editor,
-  onAddLink,
-  onAddBlockMath,
-  onAddImage,
-}: FormatBarProps) {
-  const [tableMenuOpen, setTableMenuOpen] = useState(false);
-
-  if (!editor) return null;
-
-  return (
-    <div className="flex items-center gap-1 px-3 pb-2 border-b border-border overflow-x-auto scrollbar-none">
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleBold().run()}
-        isActive={editor.isActive("bold")}
-        title={`Bold (${mod}${isMac ? "" : "+"}B)`}
-      >
-        <BoldIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleItalic().run()}
-        isActive={editor.isActive("italic")}
-        title={`Italic (${mod}${isMac ? "" : "+"}I)`}
-      >
-        <ItalicIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleStrike().run()}
-        isActive={editor.isActive("strike")}
-        title={`Strikethrough (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}S)`}
-      >
-        <StrikethroughIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-
-      <div className="w-px h-4.5 border-l border-border mx-2" />
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-        isActive={editor.isActive("heading", { level: 1 })}
-        title={`Heading 1 (${mod}${isMac ? "" : "+"}${alt}${isMac ? "" : "+"}1)`}
-      >
-        <Heading1Icon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-        isActive={editor.isActive("heading", { level: 2 })}
-        title={`Heading 2 (${mod}${isMac ? "" : "+"}${alt}${isMac ? "" : "+"}2)`}
-      >
-        <Heading2Icon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
-        isActive={editor.isActive("heading", { level: 3 })}
-        title={`Heading 3 (${mod}${isMac ? "" : "+"}${alt}${isMac ? "" : "+"}3)`}
-      >
-        <Heading3Icon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleHeading({ level: 4 }).run()}
-        isActive={editor.isActive("heading", { level: 4 })}
-        title={`Heading 4 (${mod}${isMac ? "" : "+"}${alt}${isMac ? "" : "+"}4)`}
-      >
-        <Heading4Icon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-
-      <div className="w-px h-4.5 border-l border-border mx-2" />
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleBulletList().run()}
-        isActive={editor.isActive("bulletList")}
-        title={`Bullet List (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}8)`}
-      >
-        <ListIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleOrderedList().run()}
-        isActive={editor.isActive("orderedList")}
-        title={`Numbered List (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}7)`}
-      >
-        <ListOrderedIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleTaskList().run()}
-        isActive={editor.isActive("taskList")}
-        title="Task List"
-      >
-        <CheckSquareIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleBlockquote().run()}
-        isActive={editor.isActive("blockquote")}
-        title={`Blockquote (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}B)`}
-      >
-        <QuoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleCode().run()}
-        isActive={editor.isActive("code")}
-        title={`Inline Code (${mod}${isMac ? "" : "+"}E)`}
-      >
-        <InlineCodeIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleCodeBlock().run()}
-        isActive={editor.isActive("codeBlock")}
-        title={`Code Block (${mod}${isMac ? "" : "+"}${alt}${isMac ? "" : "+"}C)`}
-      >
-        <CodeIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={onAddBlockMath}
-        isActive={editor.isActive("blockMath")}
-        title="Block Math"
-      >
-        <BlockMathIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().setHorizontalRule().run()}
-        isActive={false}
-        title="Horizontal Rule"
-      >
-        <SeparatorIcon />
-      </ToolbarButton>
-
-      <div className="w-px h-4.5 border-l border-border mx-2" />
-
-      <ToolbarButton
-        onClick={onAddLink}
-        isActive={editor.isActive("link")}
-        title={`Add Link (${mod}${isMac ? "" : "+"}K)`}
-      >
-        <LinkIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton
-        onClick={() => editor.chain().focus().insertContent("[[").run()}
-        isActive={false}
-        title="Insert Wikilink"
-      >
-        <BracketsIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <ToolbarButton onClick={onAddImage} isActive={false} title="Add Image">
-        <ImageIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-      </ToolbarButton>
-      <DropdownMenu.Root open={tableMenuOpen} onOpenChange={setTableMenuOpen}>
-        <Tooltip content="Insert Table">
-          <DropdownMenu.Trigger asChild>
-            <ToolbarButton isActive={editor.isActive("table")}>
-              <TableIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-            </ToolbarButton>
-          </DropdownMenu.Trigger>
-        </Tooltip>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content
-            className="p-2.5 bg-bg border border-border rounded-md shadow-lg z-50"
-            onCloseAutoFocus={(e) => e.preventDefault()}
-          >
-            <GridPicker
-              onSelect={(rows, cols) => {
-                editor
-                  .chain()
-                  .focus()
-                  .insertTable({
-                    rows,
-                    cols,
-                    withHeaderRow: true,
-                  })
-                  .run();
-                setTableMenuOpen(false);
-              }}
-            />
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
-    </div>
-  );
-}
 
 // Data source for preview mode — bypasses NotesContext
 export interface PreviewModeData {
@@ -547,7 +336,10 @@ export function Editor({
     },
     [previewSave],
   );
-  const saveNote = previewMode ? savePreview : notesCtx!.saveNote;
+  const saveNote: NonNullable<typeof notesCtx>["saveNote"] = previewMode
+    ? savePreview
+    : notesCtx!.saveNote;
+  const setPendingSaveFlush = notesCtx?.setPendingSaveFlush;
 
   const createNote = notesCtx?.createNote;
   const consumePendingNewNote = notesCtx?.consumePendingNewNote;
@@ -565,21 +357,10 @@ export function Editor({
   const notes = notesCtx?.notes;
   const { textDirection } = useTheme();
   const [isSaving, setIsSaving] = useState(false);
-  // Force re-render when selection changes to update toolbar active states
-  const [, setSelectionKey] = useState(0);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
-  // Delay transition classes until after initial mount to avoid format bar height animation on note load
-  const [hasTransitioned, setHasTransitioned] = useState(false);
-  useEffect(() => {
-    if (!hasTransitioned && currentNote) {
-      const id = requestAnimationFrame(() => setHasTransitioned(true));
-      return () => cancelAnimationFrame(id);
-    }
-    return undefined;
-  }, [hasTransitioned, currentNote]);
 
-  // Delay format bar / header transitions only when the sidebar needs to animate closed
+  // Delay header transitions only when the sidebar needs to animate closed
   const needsSidebarDelay = focusMode && sidebarVisible;
   const isSidebarActive = sidebarVisible && !focusMode;
   // Source mode state
@@ -605,9 +386,20 @@ export function Editor({
   const linkPopupRef = useRef<TippyInstance | null>(null);
   const blockMathPopupRef = useRef<TippyInstance | null>(null);
   const isLoadingRef = useRef(false);
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Renames made by this editor's saves, oldest first
+  const renamesRef = useRef<
+    { from: string; to: string; changes: Map<string, string> }[]
+  >([]);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const editorAreaRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<TiptapEditor | null>(null);
   const currentNoteIdRef = useRef<string | null>(null);
+  // Track which note's content is currently loaded in the editor
+  const loadedNoteIdRef = useRef<string | null>(null);
+  // Image paths are only converted for notes inside the notes folder
+  const notesFolderRef = useRef<string | null>(null);
+  notesFolderRef.current = previewMode ? null : (notesCtx?.notesFolder ?? null);
   // Track if we need to save (use ref to avoid computing markdown on every keystroke)
   const needsSaveRef = useRef(false);
   // Stable refs for wikilink click handler (avoids re-registering listener on every notes change)
@@ -619,21 +411,70 @@ export function Editor({
   // Keep ref in sync with current note ID
   currentNoteIdRef.current = currentNote?.id ?? null;
 
+  const loadedNoteLocation = useCallback((): NoteLocation | null => {
+    const notesFolder = notesFolderRef.current;
+    const noteId = loadedNoteIdRef.current;
+    return notesFolder && noteId ? { notesFolder, noteId } : null;
+  }, []);
+
   // Get markdown from editor
   const getMarkdown = useCallback(
-    (editorInstance: ReturnType<typeof useEditor>) => {
-      if (!editorInstance) return "";
-      const manager = editorInstance.storage.markdown?.manager;
-      if (manager) {
-        let markdown = manager.serialize(editorInstance.getJSON());
-        // Clean up nbsp entities that TipTap inserts (especially in table cells)
-        markdown = markdown.replace(/&nbsp;|&#160;/g, " ");
-        return markdown;
+    (editorInstance: ReturnType<typeof useEditor>) =>
+      editorInstance
+        ? editorMarkdown(editorInstance, loadedNoteLocation())
+        : "",
+    [loadedNoteLocation],
+  );
+
+  // Inserts an image the backend copied into the notes folder (`assets/x.png`)
+  const insertImage = useCallback(async (path: string) => {
+    const notesFolder = await invoke<string>("get_notes_folder");
+    editorRef.current
+      ?.chain()
+      .focus()
+      .setImage({ src: assetUrl(notesFolder, path) })
+      .run();
+  }, []);
+
+  // Copies files into `assets/` and inserts them at the cursor: images as
+  // images, anything else as a file card.
+  const insertFiles = useCallback(async (sourcePaths: string[]) => {
+    const notesFolder = await invoke<string>("get_notes_folder");
+    for (const sourcePath of sourcePaths) {
+      const image = isImagePath(sourcePath);
+      try {
+        const path = await invoke<string>(
+          image ? "copy_image_to_assets" : "copy_file_to_assets",
+          { sourcePath },
+        );
+        const src = assetUrl(notesFolder, path);
+        const editorInstance = editorRef.current;
+        // After the selection, so a file inserted before is not replaced
+        editorInstance
+          ?.chain()
+          .focus()
+          .insertContentAt(
+            editorInstance.state.selection.to,
+            image
+              ? { type: "image", attrs: { src } }
+              : {
+                  type: "fileCard",
+                  attrs: { href: src, name: path.split("/").pop() },
+                },
+          )
+          .run();
+      } catch (error) {
+        console.error("Failed to add file:", error);
+        toast.error(image ? "Failed to add image" : "Failed to attach file");
       }
-      // Fallback to plain text
-      return editorInstance.getText();
-    },
-    [],
+    }
+  }, []);
+
+  // Parse note markdown into editor content
+  const parseMarkdown = useCallback(
+    (manager: MarkdownManager, markdown: string) =>
+      withDisplaySrcs(manager.parse(markdown), loadedNoteLocation()),
+    [loadedNoteLocation],
   );
 
   // Load settings when note changes or notes are refreshed (e.g., after pin/unpin)
@@ -742,59 +583,146 @@ export function Editor({
     [],
   );
 
-  // Immediate save function (used for flushing)
-  const saveImmediately = useCallback(
-    async (noteId: string, content: string) => {
-      setIsSaving(true);
-      try {
-        lastSaveRef.current = { noteId, content };
-        await saveNote(content, noteId);
-      } finally {
-        setIsSaving(false);
+  // Points links and file paths at new targets in place, so the selection
+  // and the nodes around them stay as they are.
+  const relinkEditor = useCallback((changes: Map<string, string>) => {
+    const editorInstance = editorRef.current;
+    if (!editorInstance || changes.size === 0) return;
+    const { tr } = editorInstance.state;
+    editorInstance.state.doc.descendants((node, pos) => {
+      for (const mark of node.marks) {
+        const href = changes.get(mark.attrs.href);
+        if (mark.type.name === "link" && href) {
+          tr.addMark(
+            pos,
+            pos + node.nodeSize,
+            mark.type.create({ ...mark.attrs, href }),
+          );
+        }
       }
+      const attr =
+        node.type.name === "image"
+          ? "src"
+          : node.type.name === "fileCard"
+            ? "href"
+            : null;
+      const target = attr && changes.get(node.attrs[attr]);
+      if (attr && target) {
+        tr.setNodeMarkup(pos, undefined, { ...node.attrs, [attr]: target });
+      }
+    });
+    isLoadingRef.current = true;
+    editorInstance.view.dispatch(tr.setMeta("addToHistory", false));
+    isLoadingRef.current = false;
+  }, []);
+
+  // A save that renamed the note (its title changed) keeps the editing
+  // session on the new id. The backend may also have rewritten links, such
+  // as those to the page's own sub-pages: apply them without reloading.
+  const followRename = useCallback(
+    (savedId: string, sent: string, note: Note) => {
+      if (note.id === savedId) return;
+      const manager = editorRef.current?.storage.markdown?.manager;
+      const notesFolder = notesFolderRef.current;
+      const changes =
+        manager && notesFolder
+          ? changedTargets(
+              withDisplaySrcs(manager.parse(sent), {
+                notesFolder,
+                noteId: savedId,
+              }),
+              withDisplaySrcs(manager.parse(note.content), {
+                notesFolder,
+                noteId: note.id,
+              }),
+            )
+          : new Map<string, string>();
+      renamesRef.current.push({ from: savedId, to: note.id, changes });
+      if (loadedNoteIdRef.current !== savedId) return;
+      loadedNoteIdRef.current = note.id;
+      relinkEditor(changes);
     },
-    [saveNote],
+    [relinkEditor],
   );
 
-  // Flush any pending save immediately (saves to the note currently loaded in editor)
-  const flushPendingSave = useCallback(async () => {
+  // Saves run one at a time. A save queued while an earlier one renamed the
+  // note goes to the new id, with the links that rename rewrote; `content`
+  // gets both. Resolves when the save is done.
+  const queueSave = useCallback(
+    (
+      noteId: string,
+      content: (id: string, changes: Map<string, string>[]) => string,
+    ) => {
+      const since = renamesRef.current.length;
+      const save = saveChainRef.current.then(async () => {
+        let id = noteId;
+        const changes: Map<string, string>[] = [];
+        for (const rename of renamesRef.current.slice(since)) {
+          if (rename.from !== id) continue;
+          id = rename.to;
+          changes.push(rename.changes);
+        }
+        const markdown = content(id, changes);
+        setIsSaving(true);
+        try {
+          await saveNote(markdown, id, (note) =>
+            followRename(id, markdown, note),
+          );
+        } finally {
+          setIsSaving(false);
+        }
+      });
+      // A failed save must not stop the ones queued after it
+      saveChainRef.current = save.catch(() => undefined);
+      return save;
+    },
+    [saveNote, followRename],
+  );
+
+  // Queues a save of pending edits (to the note loaded in the editor, not
+  // currentNoteIdRef, which may have changed). Resolves when every save
+  // queued so far is done.
+  const flushPendingSave = useCallback(() => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
-
-    // Use loadedNoteIdRef (the note in the editor) not currentNoteIdRef (which may have changed)
-    if (needsSaveRef.current && editorRef.current && loadedNoteIdRef.current) {
+    const editorInstance = editorRef.current;
+    const noteId = loadedNoteIdRef.current;
+    if (needsSaveRef.current && editorInstance && noteId) {
       needsSaveRef.current = false;
-      const markdown = getMarkdown(editorRef.current);
-      await saveImmediately(loadedNoteIdRef.current, markdown);
+      const doc = editorInstance.getJSON();
+      void queueSave(noteId, (id, changes) => {
+        const notesFolder = notesFolderRef.current;
+        return editorMarkdown(
+          editorInstance,
+          notesFolder ? { notesFolder, noteId: id } : null,
+          changes.reduce(withChangedTargets, doc),
+        );
+      });
     }
-  }, [saveImmediately, getMarkdown]);
+    return saveChainRef.current;
+  }, [queueSave]);
 
   // Schedule a debounced save (markdown computed only when timer fires)
   const scheduleSave = useCallback(() => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
     }
-
-    const savingNoteId = currentNote?.id;
-    if (!savingNoteId) return;
+    if (!loadedNoteIdRef.current) return;
 
     needsSaveRef.current = true;
-
-    saveTimeoutRef.current = window.setTimeout(async () => {
-      if (currentNoteIdRef.current !== savingNoteId || !needsSaveRef.current) {
-        return;
-      }
-
-      // Compute markdown only now, when we actually save
-      if (editorRef.current) {
-        needsSaveRef.current = false;
-        const markdown = getMarkdown(editorRef.current);
-        await saveImmediately(savingNoteId, markdown);
-      }
+    saveTimeoutRef.current = window.setTimeout(() => {
+      void flushPendingSave();
     }, 500);
-  }, [saveImmediately, getMarkdown, currentNote?.id]);
+  }, [flushPendingSave]);
+
+  // Moves flush first, so no save is left to write to a path that moved
+  useEffect(() => {
+    if (!setPendingSaveFlush) return undefined;
+    setPendingSaveFlush(flushPendingSave);
+    return () => setPendingSaveFlush(null);
+  }, [setPendingSaveFlush, flushPendingSave]);
 
   const closeBlockMathPopup = useCallback(() => {
     if (blockMathPopupRef.current) {
@@ -803,7 +731,7 @@ export function Editor({
     }
   }, []);
 
-  const handleEditBlockMath = useCallback(
+  const handleEditMath = useCallback(
     (pos: number) => {
       const currentEditor = editorRef.current;
       if (!currentEditor) return;
@@ -815,7 +743,7 @@ export function Editor({
       closeBlockMathPopup();
 
       const node = currentEditor.state.doc.nodeAt(pos);
-      if (!node || node.type.name !== "blockMath") {
+      if (node?.type.name !== "blockMath" && node?.type.name !== "inlineMath") {
         return;
       }
 
@@ -859,7 +787,13 @@ export function Editor({
             currentEditor
               .chain()
               .focus()
-              .updateBlockMath({ pos, latex: trimmed })
+              .command(({ tr }) => {
+                tr.setNodeMarkup(pos, undefined, {
+                  ...node.attrs,
+                  latex: trimmed,
+                });
+                return true;
+              })
               .setTextSelection(pos + node.nodeSize)
               .run();
             closeBlockMathPopup();
@@ -911,7 +845,7 @@ export function Editor({
       selection instanceof NodeSelection &&
       selection.node.type.name === "blockMath"
     ) {
-      handleEditBlockMath(from);
+      handleEditMath(from);
       return;
     }
 
@@ -921,7 +855,7 @@ export function Editor({
         selectedNode?.type.name === "blockMath" &&
         from + selectedNode.nodeSize === to
       ) {
-        handleEditBlockMath(from);
+        handleEditMath(from);
         return;
       }
     }
@@ -929,12 +863,12 @@ export function Editor({
     if (empty) {
       const nodeBefore = $from.nodeBefore;
       if (nodeBefore?.type.name === "blockMath") {
-        handleEditBlockMath(from - nodeBefore.nodeSize);
+        handleEditMath(from - nodeBefore.nodeSize);
         return;
       }
       const nodeAfter = $from.nodeAfter;
       if (nodeAfter?.type.name === "blockMath") {
-        handleEditBlockMath(from);
+        handleEditMath(from);
         return;
       }
     }
@@ -1056,7 +990,58 @@ export function Editor({
         component.destroy();
       },
     });
-  }, [closeBlockMathPopup, handleEditBlockMath]);
+  }, [closeBlockMathPopup, handleEditMath]);
+
+  const handleAddInlineMath = useCallback(() => {
+    const currentEditor = editorRef.current;
+    if (!currentEditor) return;
+
+    closeBlockMathPopup();
+    const pos = currentEditor.state.selection.from;
+    const component = new ReactRenderer(BlockMathEditor, {
+      props: {
+        initialLatex: "",
+        onSubmit: (latex: string) => {
+          const trimmed = latex.trim();
+          if (!trimmed) {
+            toast.error("Please enter a formula.");
+            return;
+          }
+          currentEditor
+            .chain()
+            .focus()
+            .insertContentAt(pos, {
+              type: "inlineMath",
+              attrs: { latex: trimmed },
+            })
+            .run();
+          closeBlockMathPopup();
+        },
+        onCancel: () => {
+          currentEditor.commands.focus();
+          closeBlockMathPopup();
+        },
+      },
+      editor: currentEditor,
+    });
+
+    blockMathPopupRef.current = tippy(document.body, {
+      getReferenceClientRect: () => {
+        const { left, top, bottom } = currentEditor.view.coordsAtPos(pos);
+        return new DOMRect(left, top, 2, bottom - top);
+      },
+      appendTo: () => document.body,
+      content: component.element,
+      showOnCreate: true,
+      interactive: true,
+      trigger: "manual",
+      placement: "bottom-start",
+      offset: [0, 8],
+      onDestroy: () => {
+        component.destroy();
+      },
+    });
+  }, [closeBlockMathPopup]);
 
   const editor = useEditor({
     textDirection,
@@ -1066,10 +1051,25 @@ export function Editor({
           levels: [1, 2, 3, 4, 5, 6],
         },
         codeBlock: false,
+        // Link is configured below; StarterKit's own copy opens every clicked
+        // link with window.open, including links to notes.
+        link: false,
       }),
       CodeBlockLowlight.extend({
         addNodeView() {
           return ReactNodeViewRenderer(CodeBlockView);
+        },
+        // The default fence is always ```, which a ``` line in the code ends
+        renderMarkdown(node, h) {
+          const language: unknown = node.attrs?.language;
+          const code = node.content ? h.renderChildren(node.content) : "";
+          const longest = (code.match(/`+/g) ?? []).reduce(
+            (max, run) => Math.max(max, run.length),
+            0,
+          );
+          const fence = "`".repeat(Math.max(3, longest + 1));
+          const info = typeof language === "string" ? language : "";
+          return `${fence}${info}\n${code}\n${fence}`;
         },
       }).configure({
         lowlight,
@@ -1107,10 +1107,15 @@ export function Editor({
           ];
         },
       }),
-      Image.configure({
-        inline: false,
-        allowBase64: false,
-      }),
+      ResizableImage,
+      FileCard,
+      Callout,
+      Toggle,
+      ToggleSummary,
+      ToggleContent,
+      MarkHighlight,
+      ColorTextStyle,
+      Color,
       TaskList,
       TaskItem.configure({
         nested: true,
@@ -1130,6 +1135,7 @@ export function Editor({
         currentIndex: 0,
       }),
       SlashCommand,
+      BlockShortcuts,
       Wikilink,
       WikilinkSuggestion,
       AetherBlockMath.configure({
@@ -1139,9 +1145,19 @@ export function Editor({
           macros: katexMacros,
         },
         onClick: (_node, pos) => {
-          handleEditBlockMath(pos);
+          handleEditMath(pos);
         },
       }),
+      AetherInlineMath.configure({
+        katexOptions: {
+          throwOnError: false,
+          macros: katexMacros,
+        },
+        onClick: (_node, pos) => {
+          handleEditMath(pos);
+        },
+      }),
+      EscapedDollar,
     ],
     editorProps: {
       attributes: {
@@ -1204,20 +1220,7 @@ export function Editor({
                   "save_clipboard_image",
                   { base64Data: base64 },
                 );
-
-                // Get notes folder and construct absolute path using Tauri's join
-                const notesFolder = await invoke<string>("get_notes_folder");
-                const absolutePath = await join(notesFolder, relativePath);
-
-                // Convert to Tauri asset URL
-                const assetUrl = convertFileSrc(absolutePath);
-
-                // Insert image
-                editorRef.current
-                  ?.chain()
-                  .focus()
-                  .setImage({ src: assetUrl })
-                  .run();
+                await insertImage(relativePath);
               } catch (error) {
                 console.error("Failed to paste image:", error);
                 toast.error("Failed to paste image");
@@ -1251,7 +1254,7 @@ export function Editor({
         const manager = currentEditor.storage.markdown?.manager;
         if (manager && typeof manager.parse === "function") {
           try {
-            const parsed = manager.parse(text);
+            const parsed = parseMarkdown(manager, text);
             if (parsed) {
               currentEditor.commands.insertContent(parsed);
               return true;
@@ -1271,20 +1274,12 @@ export function Editor({
       if (isLoadingRef.current) return;
       scheduleSave();
     },
-    onSelectionUpdate: () => {
-      // Trigger re-render to update toolbar active states
-      setSelectionKey((k) => k + 1);
-    },
     // Prevent flash of unstyled content during initial render
     immediatelyRender: false,
   });
 
-  // Track which note's content is currently loaded in the editor
-  const loadedNoteIdRef = useRef<string | null>(null);
   // Track the modified timestamp of the loaded content
   const loadedModifiedRef = useRef<number | null>(null);
-  // Track the last save (note ID and content) to detect our own saves vs external changes
-  const lastSaveRef = useRef<{ noteId: string; content: string } | null>(null);
   // Track reloadVersion to detect manual refreshes
   const lastReloadVersionRef = useRef(0);
 
@@ -1406,7 +1401,7 @@ export function Editor({
     return () => clearTimeout(timer);
   }, [searchQuery, editor, findMatches, updateSearchDecorations]);
 
-  // Handle clicks on wikilinks and external links
+  // Handle clicks on wikilinks, links to notes, and external links
   useEffect(() => {
     if (!editor) return undefined;
 
@@ -1437,6 +1432,17 @@ export function Editor({
       const link = target.closest("a");
       if (link) {
         e.preventDefault();
+        const fromId = currentNoteIdRef.current;
+        const linkedId =
+          fromId && linkedNoteId(link.getAttribute("href") ?? "", fromId);
+        if (linkedId && notesCtxRef.current) {
+          if (notesRef.current?.some((n) => n.id === linkedId)) {
+            void notesCtxRef.current.selectNote(linkedId);
+          } else {
+            toast.info(`Note "${linkedId}" does not exist`);
+          }
+          return;
+        }
         if ((e.metaKey || e.ctrlKey) && link.href) {
           // Use raw href attribute and normalize to handle protocol-less URLs
           const rawHref = link.getAttribute("href") ?? "";
@@ -1467,33 +1473,14 @@ export function Editor({
       return;
     }
 
+    // A rename by our own save already moved loadedNoteIdRef (followRename)
     const isSameNote = currentNote.id === loadedNoteIdRef.current;
-
-    // Detect rename BEFORE flush to prevent stale-ID saves from creating duplicates.
-    // When a save renames the file (title changed), the ID changes but we're still
-    // editing the same note. Update loadedNoteIdRef first so any flush uses the new ID.
-    if (!isSameNote) {
-      const lastSave = lastSaveRef.current;
-      if (
-        lastSave?.noteId === loadedNoteIdRef.current &&
-        lastSave?.content === currentNote.content
-      ) {
-        loadedNoteIdRef.current = currentNote.id;
-        loadedModifiedRef.current = currentNote.modified;
-        lastSaveRef.current = null;
-        // If user typed during the rename, flush with the now-correct ID
-        if (needsSaveRef.current) {
-          void flushPendingSave();
-        }
-        return;
-      }
-    }
 
     // Flush any pending save before switching to a different note
     if (!isSameNote && needsSaveRef.current) {
       void flushPendingSave();
     }
-    // Reset source mode when genuinely switching notes (renames return early above)
+    // Reset source mode when switching notes
     if (!isSameNote) {
       setSourceMode(false);
       if (sourceTimeoutRef.current) {
@@ -1513,7 +1500,7 @@ export function Editor({
         const manager = editor.storage.markdown?.manager;
         if (manager) {
           try {
-            const parsed = manager.parse(currentNote.content);
+            const parsed = parseMarkdown(manager, currentNote.content);
             editor.commands.setContent(parsed);
           } catch {
             editor.commands.setContent(currentNote.content);
@@ -1545,7 +1532,7 @@ export function Editor({
     const manager = editor.storage.markdown?.manager;
     if (manager) {
       try {
-        const parsed = manager.parse(currentNote.content);
+        const parsed = parseMarkdown(manager, currentNote.content);
         editor.commands.setContent(parsed);
       } catch {
         // Fallback to plain text if parsing fails
@@ -1596,6 +1583,7 @@ export function Editor({
     flushPendingSave,
     reloadVersion,
     consumePendingNewNote,
+    parseMarkdown,
   ]);
 
   // Scroll to top on mount (e.g., when returning from settings)
@@ -1604,21 +1592,12 @@ export function Editor({
   }, []);
 
   // Cleanup on unmount - flush pending saves
+  const flushOnUnmountRef = useRef(flushPendingSave);
+  flushOnUnmountRef.current = flushPendingSave;
   useEffect(() => {
     return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-      // Flush any pending save before unmounting
-      if (needsSaveRef.current && editorRef.current) {
-        needsSaveRef.current = false;
-        const manager = editorRef.current.storage.markdown?.manager;
-        const markdown = manager
-          ? manager.serialize(editorRef.current.getJSON())
-          : editorRef.current.getText();
-        // Fire and forget - save will complete in background
-        void saveNote(markdown);
-      }
+      // Fire and forget - save will complete in background
+      void flushOnUnmountRef.current();
       if (linkPopupRef.current) {
         linkPopupRef.current.destroy();
       }
@@ -1627,7 +1606,7 @@ export function Editor({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only run cleanup on unmount, not when saveNote changes
+  }, []); // Only run cleanup on unmount, reading the refs as they are then
 
   // Link handlers - show inline popup at cursor position
   const handleAddLink = useCallback(() => {
@@ -1760,12 +1739,7 @@ export function Editor({
     if (!editor) return;
     const selected = await openDialog({
       multiple: false,
-      filters: [
-        {
-          name: "Images",
-          extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg"],
-        },
-      ],
+      filters: [{ name: "Images", extensions: IMAGE_EXTENSIONS }],
     });
     if (selected) {
       try {
@@ -1773,21 +1747,37 @@ export function Editor({
         const relativePath = await invoke<string>("copy_image_to_assets", {
           sourcePath: selected,
         });
-
-        // Get notes folder and construct absolute path using Tauri's join
-        const notesFolder = await invoke<string>("get_notes_folder");
-        const absolutePath = await join(notesFolder, relativePath);
-
-        // Convert to Tauri asset URL
-        const assetUrl = convertFileSrc(absolutePath);
-
-        // Insert image with asset URL
-        editor.chain().focus().setImage({ src: assetUrl }).run();
+        await insertImage(relativePath);
       } catch (error) {
         console.error("Failed to add image:", error);
       }
     }
-  }, [editor]);
+  }, [editor, insertImage]);
+
+  // Attach any file from the file picker
+  const handleAddFile = useCallback(async () => {
+    const selected = await openDialog({ multiple: false });
+    if (selected) await insertFiles([selected]);
+  }, [insertFiles]);
+
+  // Files dropped from the OS. The backend opens dropped .md files.
+  useEffect(() => {
+    if (!editor) return undefined;
+    const unlisten = getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type !== "drop") return;
+      const files = payload.paths.filter(
+        (path) => !/\.(?:md|markdown)$/i.test(path),
+      );
+      const { x, y } = payload.position.toLogical(window.devicePixelRatio);
+      const pos = editor.view.posAtCoords({ left: x, top: y })?.pos;
+      if (files.length === 0 || pos === undefined) return;
+      editor.commands.setTextSelection(pos);
+      void insertFiles(files);
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [editor, insertFiles]);
 
   // Listen for slash command image insertion
   useEffect(() => {
@@ -1796,6 +1786,12 @@ export function Editor({
     return () => window.removeEventListener("slash-command-image", handler);
   }, [handleAddImage]);
 
+  useEffect(() => {
+    const handler = () => void handleAddFile();
+    window.addEventListener("slash-command-file", handler);
+    return () => window.removeEventListener("slash-command-file", handler);
+  }, [handleAddFile]);
+
   // Listen for slash command block math insertion
   useEffect(() => {
     const handler = () => handleAddBlockMath();
@@ -1803,6 +1799,48 @@ export function Editor({
     return () =>
       window.removeEventListener("slash-command-block-math", handler);
   }, [handleAddBlockMath]);
+
+  useEffect(() => {
+    const handler = () => handleAddInlineMath();
+    window.addEventListener("slash-command-inline-math", handler);
+    return () =>
+      window.removeEventListener("slash-command-inline-math", handler);
+  }, [handleAddInlineMath]);
+
+  // Listen for slash command sub-page creation: a new note inside this
+  // note's sub-page folder, linked at the cursor
+  useEffect(() => {
+    const handler = async () => {
+      const parentId = loadedNoteIdRef.current;
+      const ctx = notesCtxRef.current;
+      if (!parentId || !ctx) return;
+      try {
+        const subPage = await notesService.createNote(parentId);
+        await ctx.refreshNotes();
+        if (loadedNoteIdRef.current !== parentId) return;
+        editorRef.current
+          ?.chain()
+          .focus()
+          .insertContent({
+            type: "text",
+            text: subPage.title,
+            marks: [
+              {
+                type: "link",
+                attrs: { href: noteHref(parentId, subPage.id) },
+              },
+            ],
+          })
+          .unsetMark("link")
+          .run();
+      } catch (error) {
+        console.error("Failed to create sub-page:", error);
+        toast.error(errorMessage(error, "Failed to create sub-page"));
+      }
+    };
+    window.addEventListener("slash-command-sub-page", handler);
+    return () => window.removeEventListener("slash-command-sub-page", handler);
+  }, []);
 
   // Keyboard shortcut for Cmd+K to add link (only when editor is focused)
   useEffect(() => {
@@ -1825,7 +1863,12 @@ export function Editor({
   // Keyboard shortcut for Cmd+Shift+C to open copy menu
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "c") {
+      // With Shift held, e.key is "C"
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "c"
+      ) {
         e.preventDefault();
         setCopyMenuOpen(true);
       }
@@ -1935,14 +1978,17 @@ export function Editor({
   const handleCopyHtml = useCallback(async () => {
     if (!editor) return;
     try {
-      const html = editor.getHTML();
+      const location = loadedNoteLocation();
+      const html = location
+        ? await noteClipboardHtml(editor, location)
+        : editor.getHTML();
       await invoke("copy_to_clipboard", { text: html });
       toast.success("Copied as HTML");
     } catch (error) {
       console.error("Failed to copy HTML:", error);
       toast.error("Failed to copy");
     }
-  }, [editor]);
+  }, [editor, loadedNoteLocation]);
 
   // Download handlers
   const handleDownloadPdf = useCallback(async () => {
@@ -1975,6 +2021,18 @@ export function Editor({
       toast.error("Failed to save markdown");
     }
   }, [editor, currentNote, getMarkdown]);
+
+  const handleExportZip = useCallback(() => {
+    const id = loadedNoteIdRef.current;
+    if (!editor || !currentNote || !id) return;
+    void exportNoteZip(id, getMarkdown(editor), currentNote.title);
+  }, [editor, currentNote, getMarkdown]);
+
+  const handleExportHtml = useCallback(() => {
+    const location = loadedNoteLocation();
+    if (!editor || !currentNote || !location) return;
+    void exportNoteHtml(editor, location, currentNote.title);
+  }, [editor, currentNote, loadedNoteLocation]);
 
   // Toggle source mode — computes anchor data and toggles state;
   // focus/scroll restoration happens in the useLayoutEffect below.
@@ -2050,7 +2108,7 @@ export function Editor({
       const manager = editor.storage.markdown?.manager;
       if (manager) {
         try {
-          const parsed = manager.parse(sourceContent);
+          const parsed = parseMarkdown(manager, sourceContent);
           editor.commands.setContent(parsed);
         } catch {
           editor.commands.setContent(sourceContent);
@@ -2060,7 +2118,7 @@ export function Editor({
       }
       setSourceMode(false);
     }
-  }, [editor, sourceMode, sourceContent, getMarkdown]);
+  }, [editor, sourceMode, sourceContent, getMarkdown, parseMarkdown]);
 
   // Restore focus and scroll position after source mode transitions.
   // useLayoutEffect runs synchronously after React commits DOM changes,
@@ -2145,22 +2203,12 @@ export function Editor({
       if (sourceTimeoutRef.current) {
         clearTimeout(sourceTimeoutRef.current);
       }
-      sourceTimeoutRef.current = window.setTimeout(async () => {
-        if (currentNote) {
-          setIsSaving(true);
-          try {
-            lastSaveRef.current = { noteId: currentNote.id, content: value };
-            await saveNote(value, currentNote.id);
-          } catch (error) {
-            console.error("Failed to save note:", error);
-            toast.error("Failed to save note");
-          } finally {
-            setIsSaving(false);
-          }
-        }
+      sourceTimeoutRef.current = window.setTimeout(() => {
+        const noteId = loadedNoteIdRef.current;
+        if (noteId) void queueSave(noteId, () => value);
       }, 300);
     },
-    [currentNote, saveNote],
+    [queueSave],
   );
 
   if (!currentNote) {
@@ -2375,7 +2423,7 @@ export function Editor({
               content={`Export (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}C)`}
             >
               <DropdownMenu.Trigger asChild>
-                <IconButton>
+                <IconButton aria-label="Export">
                   <ShareIcon className="w-4.25 h-4.25 stroke-[1.6]" />
                 </IconButton>
               </DropdownMenu.Trigger>
@@ -2432,6 +2480,24 @@ export function Editor({
                   <DownloadIcon className="w-4 h-4 stroke-[1.6]" />
                   Export Markdown
                 </DropdownMenu.Item>
+                {!previewMode && (
+                  <>
+                    <DropdownMenu.Item
+                      className="px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2"
+                      onSelect={handleExportZip}
+                    >
+                      <DownloadIcon className="w-4 h-4 stroke-[1.6]" />
+                      Export Zip
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      className="px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2"
+                      onSelect={handleExportHtml}
+                    >
+                      <DownloadIcon className="w-4 h-4 stroke-[1.6]" />
+                      Export HTML
+                    </DropdownMenu.Item>
+                  </>
+                )}
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
@@ -2451,19 +2517,6 @@ export function Editor({
             </Tooltip>
           )}
         </div>
-      </div>
-
-      {/* Format Bar – transition only after initial mount to avoid height animation on note load */}
-      <div
-        data-format-bar
-        className={`${focusMode || sourceMode ? "opacity-0 max-h-0 overflow-hidden pointer-events-none" : "opacity-100 max-h-20"} ${hasTransitioned ? `transition-all duration-400 ${needsSidebarDelay ? "delay-200" : ""}` : ""}`}
-      >
-        <FormatBar
-          editor={editor}
-          onAddLink={handleAddLink}
-          onAddBlockMath={handleAddBlockMath}
-          onAddImage={handleAddImage}
-        />
       </div>
 
       {/* Editor content area with resize handles overlay */}
@@ -2536,7 +2589,8 @@ export function Editor({
                 </div>
               )}
               <div
-                className="h-full"
+                ref={editorAreaRef}
+                className="h-full relative"
                 onContextMenu={async (e) => {
                   if (!editor) return;
 
@@ -2712,6 +2766,12 @@ export function Editor({
                 }}
               >
                 <EditorContent editor={editor} className="h-full text-text" />
+                {editor && (
+                  <>
+                    <BlockHandle editor={editor} containerRef={editorAreaRef} />
+                    <SelectionToolbar editor={editor} onLink={handleAddLink} />
+                  </>
+                )}
               </div>
             </>
           )}

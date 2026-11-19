@@ -22,7 +22,12 @@ import {
   TableIcon,
   BracketsIcon,
   WorkflowIcon,
+  NoteIcon,
+  CalloutIcon,
+  ToggleIcon,
+  PaperclipIcon,
 } from "../icons";
+import { wrapInToggle } from "./Toggle";
 import { SlashCommandList, type SlashCommandListRef } from "./SlashCommandList";
 
 export interface SlashCommandItem {
@@ -125,6 +130,24 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     },
   },
   {
+    title: "Callout",
+    description: "Highlighted box with an icon",
+    icon: <CalloutIcon />,
+    aliases: ["callout", "info", "tip", "warning"],
+    command: (editor) => {
+      editor.chain().focus().wrapIn("callout").run();
+    },
+  },
+  {
+    title: "Toggle",
+    description: "Collapsible section",
+    icon: <ToggleIcon />,
+    aliases: ["toggle", "details", "collapse", "fold"],
+    command: (editor) => {
+      editor.chain().focus().command(wrapInToggle).run();
+    },
+  },
+  {
     title: "Mermaid Diagram",
     description: "Mermaid diagram block",
     icon: <WorkflowIcon />,
@@ -144,12 +167,32 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     },
   },
   {
+    title: "Inline Math",
+    description: "Formula inside a line of text",
+    icon: <BlockMathIcon />,
+    aliases: ["math", "equation", "latex"],
+    command: (editor) => {
+      editor.chain().focus().run();
+      window.dispatchEvent(new CustomEvent("slash-command-inline-math"));
+    },
+  },
+  {
     title: "Horizontal Rule",
     description: "Visual divider",
     icon: <SeparatorIcon />,
     aliases: ["divider", "separator", "hr", "line"],
     command: (editor) => {
       editor.chain().focus().setHorizontalRule().run();
+    },
+  },
+  {
+    title: "File",
+    description: "Attach a file",
+    icon: <PaperclipIcon />,
+    aliases: ["attachment", "attach", "pdf", "upload"],
+    command: (editor) => {
+      editor.chain().focus().run();
+      window.dispatchEvent(new CustomEvent("slash-command-file"));
     },
   },
   {
@@ -173,6 +216,16 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
         .focus()
         .insertTable({ rows: 3, cols: 3, withHeaderRow: true })
         .run();
+    },
+  },
+  {
+    title: "Sub-page",
+    description: "New page inside this one",
+    icon: <NoteIcon />,
+    aliases: ["page", "subpage", "child"],
+    command: (editor) => {
+      editor.chain().focus().run();
+      window.dispatchEvent(new CustomEvent("slash-command-sub-page"));
     },
   },
   {

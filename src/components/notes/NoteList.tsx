@@ -14,6 +14,7 @@ import {
   AlertDialogTitle,
 } from "../ui";
 import { cleanTitle } from "../../lib/utils";
+import { useDeleteNoteWarning } from "../../lib/folderTree";
 import * as notesService from "../../services/notes";
 import { FolderTreeView } from "./FolderTreeView";
 import { PinIcon, CopyIcon, TrashIcon } from "../icons";
@@ -250,6 +251,9 @@ export function NoteList({
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
+  const deleteWarning = useDeleteNoteWarning(
+    deleteDialogOpen ? noteToDelete : null,
+  );
   const [settings, setSettings] = useState<Settings | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -374,13 +378,15 @@ export function NoteList({
             <AlertDialogHeader>
               <AlertDialogTitle>Delete note?</AlertDialogTitle>
               <AlertDialogDescription>
-                This will permanently delete the note and all its content. This
-                action cannot be undone.
+                {deleteWarning.text}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleDeleteConfirm}>
+              <AlertDialogAction
+                disabled={!deleteWarning.ready}
+                onClick={handleDeleteConfirm}
+              >
                 Delete
               </AlertDialogAction>
             </AlertDialogFooter>
@@ -424,13 +430,15 @@ export function NoteList({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete note?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently delete the note and all its content. This
-              action cannot be undone.
+              {deleteWarning.text}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteConfirm}>
+            <AlertDialogAction
+              disabled={!deleteWarning.ready}
+              onClick={handleDeleteConfirm}
+            >
               Delete
             </AlertDialogAction>
           </AlertDialogFooter>

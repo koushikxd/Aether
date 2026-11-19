@@ -30,11 +30,21 @@ urlencoding = "2"
 open = "5"
 regex = "1"
 walkdir = "2"
+same-file = "1"
 tauri-plugin-single-instance = "2"
 chrono = "0.4"
+zip = { version = "9.7", default-features = false, features = [
+  "deflate-flate2-zlib-rs",
+] }
+scraper = "0.29"
+ego-tree = "0.11"
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = [
   "NSUserDefaults",
   "NSString",
 ] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

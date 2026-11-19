@@ -56,6 +56,7 @@ export function ToolbarButton({
       )}
       tabIndex={-1}
       aria-label={title}
+      aria-pressed={isActive}
       {...props}
     >
       {children}

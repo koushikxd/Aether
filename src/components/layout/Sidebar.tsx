@@ -115,6 +115,9 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
 
       if (typeof overData.path !== "string") return;
       const targetFolder = overData.path;
+      // A note dropped onto itself, or a page onto one of its own sub-pages
+      const isInside = (id: string) =>
+        targetFolder === id || targetFolder.startsWith(`${id}/`);
 
       try {
         if (activeData.type === "note" && typeof activeData.id === "string") {
@@ -127,7 +130,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
               const parent = id.includes("/")
                 ? id.substring(0, id.lastIndexOf("/"))
                 : "";
-              return parent !== targetFolder;
+              return parent !== targetFolder && !isInside(id);
             });
             if (noteIds.length === 0) return;
             let failures = 0;
@@ -146,7 +149,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
             const noteParent = noteId.includes("/")
               ? noteId.substring(0, noteId.lastIndexOf("/"))
               : "";
-            if (noteParent === targetFolder) return;
+            if (noteParent === targetFolder || isInside(noteId)) return;
             await moveNote(noteId, targetFolder);
             setMultiSelectedNoteIds(new Set());
           }
@@ -155,11 +158,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           typeof activeData.path === "string"
         ) {
           const folderPath = activeData.path;
-          if (
-            targetFolder === folderPath ||
-            targetFolder.startsWith(folderPath + "/")
-          )
-            return;
+          if (isInside(folderPath)) return;
           const folderParent = folderPath.includes("/")
             ? folderPath.substring(0, folderPath.lastIndexOf("/"))
             : "";
@@ -451,7 +450,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
         />
       </div>
 
-      {/* Drag overlay — floating label while dragging */}
+      {/* Drag overlay: floating label while dragging */}
       <DragOverlay>
         {dragLabel && (
           <div className="flex items-center gap-1.5 px-3 py-1.5 bg-bg border border-border rounded-md shadow-lg text-sm text-text">
