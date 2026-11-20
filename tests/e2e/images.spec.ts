@@ -121,10 +121,12 @@ test("legacy asset URLs inside the notes folder are rewritten as relative paths 
     );
   const saved = await app.savedMarkdown(NOTE);
 
-  await app.page.keyboard.press("ControlOrMeta+p");
+  await app.page.keyboard.press("ControlOrMeta+k");
   await app.page
     .getByPlaceholder("Search notes or type a command")
-    .fill("Export Markdown");
+    .fill("Copy / Export");
+  await app.page.keyboard.press("Enter");
+  await app.page.getByPlaceholder("Type to filter").fill("Export Markdown");
   await app.page.keyboard.press("Enter");
   await expect.poll(() => app.calls("write_file")).toHaveLength(1);
   const [exported] = await app.calls("write_file");

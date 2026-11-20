@@ -1842,10 +1842,15 @@ export function Editor({
     return () => window.removeEventListener("slash-command-sub-page", handler);
   }, []);
 
-  // Keyboard shortcut for Cmd+K to add link (only when editor is focused)
+  // Keyboard shortcut for Cmd+Shift+L to add link (only when editor is focused)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      // With Shift held, e.key is "L"
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "l"
+      ) {
         // Only handle if we're in the editor
         const target = e.target;
         if (!(target instanceof Element)) return;

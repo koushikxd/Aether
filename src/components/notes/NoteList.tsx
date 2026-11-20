@@ -245,8 +245,6 @@ export function NoteList({
     pinNote,
     unpinNote,
     isLoading,
-    searchQuery,
-    searchResults,
   } = useNotes();
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -295,19 +293,6 @@ export function NoteList({
     void notesService.getSettings().then(setSettings);
   }, []);
 
-  // Memoize display items to prevent recalculation on every render
-  const displayItems = useMemo(() => {
-    if (searchQuery.trim()) {
-      return searchResults.map((r) => ({
-        id: r.id,
-        title: r.title,
-        preview: r.preview,
-        modified: r.modified,
-      }));
-    }
-    return notes;
-  }, [searchQuery, searchResults, notes]);
-
   // Listen for focus request from editor (when Escape is pressed)
   useEffect(() => {
     const handleFocusNoteList = () => {
@@ -333,7 +318,6 @@ export function NoteList({
   }, [openDeleteDialogForNote]);
 
   const foldersEnabled = settings?.foldersEnabled === true;
-  const isSearching = searchQuery.trim().length > 0;
 
   if (isLoading && notes.length === 0) {
     return (
@@ -343,15 +327,7 @@ export function NoteList({
     );
   }
 
-  if (isSearching && displayItems.length === 0) {
-    return (
-      <div className="p-4 text-center text-sm text-text-muted select-none">
-        No results found
-      </div>
-    );
-  }
-
-  if (displayItems.length === 0) {
+  if (notes.length === 0) {
     return (
       <div className="p-4 text-center text-sm text-text-muted select-none">
         No notes yet
@@ -359,8 +335,8 @@ export function NoteList({
     );
   }
 
-  // Show folder tree view when folders enabled and not searching
-  if (foldersEnabled && !isSearching) {
+  // Show folder tree view when folders enabled
+  if (foldersEnabled) {
     return (
       <>
         <FolderTreeView
@@ -405,7 +381,7 @@ export function NoteList({
         data-note-list
         className="group/notelist flex flex-col gap-1 p-1.5 outline-none"
       >
-        {displayItems.map((item) => (
+        {notes.map((item) => (
           <NoteItemWithMenu
             key={item.id}
             id={item.id}

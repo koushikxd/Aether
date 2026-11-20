@@ -19,17 +19,9 @@ import {
 import { useNotes } from "../../context/NotesContext";
 import { NoteList } from "../notes/NoteList";
 import { Footer } from "./Footer";
-import { IconButton, Input } from "../ui";
-import {
-  PlusIcon,
-  XIcon,
-  SearchIcon,
-  SearchOffIcon,
-  AddNoteIcon,
-  FolderPlusIcon,
-  NoteIcon,
-} from "../icons";
-import { mod, shift, isMac, isWindows } from "../../lib/platform";
+import { IconButton } from "../ui";
+import { PlusIcon, AddNoteIcon, FolderPlusIcon, NoteIcon } from "../icons";
+import { mod, isMac, isWindows } from "../../lib/platform";
 import * as notesService from "../../services/notes";
 import { FolderNameDialog } from "../notes/FolderNameDialog";
 
@@ -42,15 +34,10 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     createNote,
     createFolder,
     notes,
-    search,
-    searchQuery,
-    clearSearch,
     selectedNoteId,
     moveNote,
     moveFolder,
   } = useNotes();
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [inputValue, setInputValue] = useState(searchQuery);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [folderDialogParent, setFolderDialogParent] = useState("");
@@ -63,8 +50,6 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const [lastClickedNoteId, setLastClickedNoteId] = useState<string | null>(
     null,
   );
-  const debounceRef = useRef<number | null>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
   const multiSelectedRef = useRef<Set<string>>(multiSelectedNoteIds);
   useLayoutEffect(() => {
     multiSelectedRef.current = multiSelectedNoteIds;
@@ -193,94 +178,6 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       });
   }, []);
 
-  // Sync input with search query
-  const [prevSearchQuery, setPrevSearchQuery] = useState(searchQuery);
-  if (searchQuery !== prevSearchQuery) {
-    setPrevSearchQuery(searchQuery);
-    setInputValue(searchQuery);
-  }
-
-  const handleSearchChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const value = e.target.value;
-      setInputValue(value);
-
-      // Debounce search
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-      }
-
-      debounceRef.current = window.setTimeout(() => {
-        void search(value);
-      }, 220);
-    },
-    [search],
-  );
-
-  const closeSearch = useCallback(() => {
-    setSearchOpen(false);
-    setInputValue("");
-    clearSearch();
-  }, [clearSearch]);
-
-  const toggleSearch = useCallback(() => {
-    if (searchOpen) {
-      closeSearch();
-    } else {
-      setSearchOpen(true);
-      setMultiSelectedNoteIds(new Set());
-    }
-  }, [searchOpen, closeSearch]);
-
-  // Auto-focus search input when opened
-  useEffect(() => {
-    if (searchOpen) {
-      // Small delay to ensure the input is rendered
-      requestAnimationFrame(() => {
-        searchInputRef.current?.focus();
-      });
-    }
-  }, [searchOpen]);
-
-  // Global shortcut hook: open and focus sidebar search
-  useEffect(() => {
-    const handleOpenSidebarSearch = () => {
-      setSearchOpen(true);
-      requestAnimationFrame(() => {
-        searchInputRef.current?.focus();
-      });
-    };
-
-    window.addEventListener("open-sidebar-search", handleOpenSidebarSearch);
-    return () =>
-      window.removeEventListener(
-        "open-sidebar-search",
-        handleOpenSidebarSearch,
-      );
-  }, []);
-
-  const handleSearchKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        if (inputValue) {
-          // First escape: clear search
-          setInputValue("");
-          clearSearch();
-        } else {
-          // Second escape: close search
-          closeSearch();
-        }
-      }
-    },
-    [inputValue, clearSearch, closeSearch],
-  );
-
-  const handleClearSearch = useCallback(() => {
-    setInputValue("");
-    clearSearch();
-  }, [clearSearch]);
-
   const handleNewFolder = useCallback(() => {
     const lastSlash = selectedNoteId?.lastIndexOf("/") ?? -1;
     setFolderDialogParent(
@@ -340,16 +237,6 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
             </div>
           </div>
           <div className="flex items-center gap-px">
-            <IconButton
-              onClick={toggleSearch}
-              title={`Search Notes (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}F)`}
-            >
-              {searchOpen ? (
-                <SearchOffIcon className="w-4.25 h-4.25 stroke-[1.5]" />
-              ) : (
-                <SearchIcon className="w-4.25 h-4.25 stroke-[1.5]" />
-              )}
-            </IconButton>
             {foldersEnabled ? (
               <DropdownMenu.Root
                 open={plusMenuOpen}
@@ -399,34 +286,8 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
             )}
           </div>
         </div>
-        {/* Scrollable area with search and notes */}
+        {/* Scrollable notes area */}
         <div className="flex-1 overflow-y-auto">
-          {/* Search - sticky at top */}
-          {searchOpen && (
-            <div className="sticky top-0 z-10 px-2 pt-2 bg-bg-secondary">
-              <div className="relative">
-                <Input
-                  ref={searchInputRef}
-                  type="text"
-                  value={inputValue}
-                  onChange={handleSearchChange}
-                  onKeyDown={handleSearchKeyDown}
-                  placeholder="Search notes..."
-                  className="h-9 pr-8 text-sm"
-                />
-                {inputValue && (
-                  <button
-                    onClick={handleClearSearch}
-                    tabIndex={-1}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text"
-                  >
-                    <XIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
           {/* Note list */}
           <NoteList
             multiSelectedNoteIds={multiSelectedNoteIds}

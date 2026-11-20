@@ -2,14 +2,16 @@ use anyhow::Result;
 use base64::Engine;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::PhrasePrefixQuery;
 use tantivy::schema::*;
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
+use tantivy::snippet::SnippetGenerator;
+use tantivy::tokenizer::TokenStream;
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Score};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl};
 use tauri::webview::WebviewWindowBuilder;
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -267,17 +269,43 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Splits text into index terms. Title and content are both TEXT fields,
+    /// so they share this tokenizer.
+    fn tokens(&self, text: &str) -> Result<Vec<String>> {
+        let mut tokenizer = self.index.tokenizer_for_field(self.content_field)?;
+        let mut stream = tokenizer.token_stream(text);
+        let mut tokens = Vec::new();
+        while let Some(token) = stream.next() {
+            tokens.push(token.text.clone());
+        }
+        Ok(tokens)
+    }
+
     fn search(&self, query_str: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let searcher = self.reader.searcher();
-        let query_parser =
-            QueryParser::for_index(&self.index, vec![self.title_field, self.content_field]);
+        let words = self.tokens(query_str)?;
+        let Some(partial) = words.last() else {
+            return Ok(Vec::new());
+        };
+        // The words must appear in order and the last one may be partial.
+        // A single word becomes a pure prefix match.
+        let phrase_prefix = |field| {
+            let mut query =
+                PhrasePrefixQuery::new(words.iter().map(|w| Term::from_field_text(field, w)).collect());
+            // The default tries only the first 50 completions per segment, which
+            // drops real matches for a short last word. Tantivy preallocates this many.
+            query.set_max_expansions(1_000);
+            query
+        };
+        let top = TopDocs::with_limit(limit).order_by_score();
 
-        // Parse query, fall back to prefix query if parsing fails
-        let query = query_parser
-            .parse_query(query_str)
-            .or_else(|_| query_parser.parse_query(&format!("{}*", query_str)))?;
-
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
+        // Title hits first, then body hits not already listed.
+        let mut top_docs = searcher.search(&phrase_prefix(self.title_field), &top)?;
+        for hit in searcher.search(&phrase_prefix(self.content_field), &top)? {
+            if top_docs.len() < limit && !top_docs.iter().any(|(_, address)| *address == hit.1) {
+                top_docs.push(hit);
+            }
+        }
 
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
@@ -305,7 +333,38 @@ impl SearchIndex {
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
 
-            let preview = generate_preview(content);
+            // Snippets score fragments by term count, so a line repeating one
+            // word can beat the match. Use the first line holding the phrase.
+            let full_words = &words[..words.len() - 1];
+            let line = content
+                .lines()
+                .find(|line| {
+                    self.tokens(line).is_ok_and(|tokens| {
+                        tokens.windows(words.len()).any(|window| {
+                            window[..full_words.len()] == *full_words
+                                && window[full_words.len()].starts_with(partial.as_str())
+                        })
+                    })
+                })
+                .unwrap_or(content);
+            // The snippet only highlights whole terms, and the query reports
+            // only its full words, so add this line's completions of the
+            // partial last word.
+            let terms: BTreeMap<String, Score> = self
+                .tokens(line)?
+                .into_iter()
+                .filter(|token| words.contains(token) || token.starts_with(partial.as_str()))
+                .map(|token| (token, 1.0))
+                .collect();
+            let tokenizer = self.index.tokenizer_for_field(self.content_field)?;
+            let snippet =
+                SnippetGenerator::new(terms, tokenizer, self.content_field, 150).snippet(line);
+            // Empty when only the title matched and the content lacks it, e.g. "Untitled".
+            let preview = if snippet.is_empty() {
+                generate_preview(content)
+            } else {
+                snippet.fragment().to_string()
+            };
 
             results.push(SearchResult {
                 id,
@@ -2284,7 +2343,7 @@ async fn fallback_search(query: &str, state: &State<'_, AppState>) -> Result<Vec
     let query_lower = query.to_lowercase();
     let mut results: Vec<SearchResult> = Vec::new();
 
-    for (id, title, preview, modified) in cache_data {
+    for (id, title, mut preview, modified) in cache_data {
         let title_lower = title.to_lowercase();
 
         let mut score = 0.0f32;
@@ -2298,8 +2357,9 @@ async fn fallback_search(query: &str, state: &State<'_, AppState>) -> Result<Vec
             Err(_) => continue,
         };
         if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
-            let content_lower = content.to_lowercase();
-            if content_lower.contains(&query_lower) {
+            // The query is one line of input, so a content match lies on one line
+            if let Some(line) = content.lines().find(|line| line.to_lowercase().contains(&query_lower)) {
+                preview = line.trim().to_string();
                 // Higher score if in title, lower if only in content
                 if score == 0.0 {
                     score += 10.0;

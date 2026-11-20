@@ -13,7 +13,6 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import type { Note, NoteMetadata } from "../types/note";
 import * as notesService from "../services/notes";
-import type { SearchResult } from "../services/notes";
 import { errorMessage } from "../services/export";
 
 // Separate contexts to prevent unnecessary re-renders
@@ -25,9 +24,6 @@ interface NotesDataContextValue {
   notesFolder: string | null;
   isLoading: boolean;
   error: string | null;
-  searchQuery: string;
-  searchResults: SearchResult[];
-  isSearching: boolean;
   hasExternalChanges: boolean;
   reloadVersion: number;
 }
@@ -51,8 +47,6 @@ interface NotesActionsContextValue {
   reloadCurrentNote: () => Promise<void>;
   setNotesFolder: (path: string) => Promise<void>;
   syncNotesFolder: (path: string) => Promise<void>;
-  search: (query: string) => Promise<void>;
-  clearSearch: () => void;
   pinNote: (id: string) => Promise<void>;
   unpinNote: (id: string) => Promise<void>;
   createNoteInFolder: (folderPath: string) => Promise<void>;
@@ -75,9 +69,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   const [notesFolder, setNotesFolderState] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
   const [hasExternalChanges, setHasExternalChanges] = useState(false);
   // Increments when user manually refreshes, so Editor knows to reload content
   const [reloadVersion, setReloadVersion] = useState(0);
@@ -88,19 +79,14 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   const refreshTimeoutRef = useRef<number | null>(null);
   // Ref to access selectedNoteId in file watcher without re-registering listener
   const selectedNoteIdRef = useRef<string | null>(null);
-  // Ref to access notes in search callback without re-creating it on every notes change
-  const notesRef = useRef<NoteMetadata[]>([]);
   const currentNoteRef = useRef<Note | null>(null);
   // Layout effect so async callbacks see the new values as soon as they commit
   useLayoutEffect(() => {
     selectedNoteIdRef.current = selectedNoteId;
-    notesRef.current = notes;
     currentNoteRef.current = currentNote;
-  }, [selectedNoteId, notes, currentNote]);
+  }, [selectedNoteId, currentNote]);
   // Monotonic counter to ignore stale async note selection responses.
   const selectRequestIdRef = useRef(0);
-  // Monotonic counter to ignore stale async search responses
-  const searchRequestIdRef = useRef(0);
   // Tracks the ID of a newly created note so Editor can focus its title.
   const pendingNewNoteIdRef = useRef<string | null>(null);
   const flushPendingSaveRef = useRef<(() => Promise<void>) | null>(null);
@@ -183,9 +169,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       await refreshNotes();
       setCurrentNote(note);
       setSelectedNoteId(note.id);
-      // Clear search when creating a new note
-      setSearchQuery("");
-      setSearchResults([]);
       setTimeout(() => {
         recentlySavedRef.current.delete(note.id);
       }, 1000);
@@ -406,8 +389,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         await refreshNotes();
         setCurrentNote(note);
         setSelectedNoteId(note.id);
-        setSearchQuery("");
-        setSearchResults([]);
         setTimeout(() => {
           recentlySavedRef.current.delete(note.id);
         }, 1000);
@@ -573,70 +554,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const search = useCallback(async (query: string) => {
-    const requestId = ++searchRequestIdRef.current;
-    setSearchQuery(query);
-
-    const trimmedQuery = query.trim();
-    if (!trimmedQuery) {
-      setSearchResults([]);
-      setIsSearching(false);
-      return;
-    }
-
-    const queryLower = trimmedQuery.toLowerCase();
-    // Instant local results for responsive UX while full-text search runs.
-    const instantResults: SearchResult[] = notesRef.current
-      .filter(
-        (note) =>
-          note.title.toLowerCase().includes(queryLower) ||
-          note.preview.toLowerCase().includes(queryLower),
-      )
-      .slice(0, 20)
-      .map((note) => ({
-        id: note.id,
-        title: note.title,
-        preview: note.preview,
-        modified: note.modified,
-        score: 0,
-      }));
-
-    // Show instant local matches immediately; clear stale results if none match.
-    setSearchResults(instantResults);
-
-    setIsSearching(true);
-    try {
-      const results = await notesService.searchNotes(trimmedQuery);
-      if (requestId !== searchRequestIdRef.current) return;
-      if (results.length === 0) {
-        // If neither backend nor instant matches found, clear results only now
-        // (after async search settles) to avoid transient empty states.
-        setSearchResults(instantResults);
-      } else {
-        // Merge backend + instant results, deduping by note id.
-        const merged = [...results];
-        const seen = new Set(results.map((result) => result.id));
-        for (const result of instantResults) {
-          if (!seen.has(result.id)) {
-            merged.push(result);
-          }
-        }
-        setSearchResults(merged);
-      }
-    } catch (err) {
-      console.error("Search failed:", err);
-    }
-    if (requestId !== searchRequestIdRef.current) return;
-    setIsSearching(false);
-  }, []);
-
-  const clearSearch = useCallback(() => {
-    searchRequestIdRef.current += 1;
-    setSearchQuery("");
-    setSearchResults([]);
-    setIsSearching(false);
-  }, []);
-
   // Load initial state
   useEffect(() => {
     async function init() {
@@ -730,9 +647,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       notesFolder,
       isLoading,
       error,
-      searchQuery,
-      searchResults,
-      isSearching,
       hasExternalChanges,
       reloadVersion,
     }),
@@ -743,9 +657,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       notesFolder,
       isLoading,
       error,
-      searchQuery,
-      searchResults,
-      isSearching,
       hasExternalChanges,
       reloadVersion,
     ],
@@ -765,8 +676,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       reloadCurrentNote,
       setNotesFolder,
       syncNotesFolder,
-      search,
-      clearSearch,
       pinNote,
       unpinNote,
       createNoteInFolder,
@@ -788,8 +697,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       reloadCurrentNote,
       setNotesFolder,
       syncNotesFolder,
-      search,
-      clearSearch,
       pinNote,
       unpinNote,
       createNoteInFolder,

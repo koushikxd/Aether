@@ -2,7 +2,7 @@ import * as React from "react";
 import { type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "./Tooltip";
-import { PinIcon } from "../icons";
+import { ChevronRightIcon, PinIcon } from "../icons";
 
 // Re-export components
 export {
@@ -209,8 +209,10 @@ export function ListItem({
 // Command palette item
 interface CommandItemProps {
   label: string;
-  subtitle?: string;
+  subtitle?: ReactNode;
   shortcut?: string;
+  /** Shows a chevron: the row opens a sub-view. */
+  subView?: boolean;
   icon?: ReactNode;
   iconText?: string;
   variant?: "note" | "command";
@@ -222,6 +224,7 @@ export function CommandItem({
   label,
   subtitle,
   shortcut,
+  subView,
   icon,
   iconText,
   variant = "command",
@@ -274,6 +277,9 @@ export function CommandItem({
         >
           {shortcut}
         </kbd>
+      )}
+      {subView && (
+        <ChevronRightIcon className="w-4 h-4 ml-2 shrink-0 text-text-muted" />
       )}
     </button>
   );

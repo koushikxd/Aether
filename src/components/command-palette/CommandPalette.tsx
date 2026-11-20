@@ -15,7 +15,7 @@ import { useGit } from "../../context/GitContext";
 import * as notesService from "../../services/notes";
 import * as aiService from "../../services/ai";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
-import type { Settings } from "../../types/note";
+import type { NoteMetadata, Settings } from "../../types/note";
 import type { Editor } from "@tiptap/react";
 import {
   CommandItem,
@@ -52,8 +52,16 @@ import {
   FolderIcon,
   FolderPlusIcon,
   KeyboardIcon,
+  SearchIcon,
+  NoteIcon,
+  PencilIcon,
+  FileExportIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
 } from "../icons";
-import { mod, shift } from "../../lib/platform";
+import { alt, mod, shift } from "../../lib/platform";
+import type { NoteNavigation } from "../../lib/noteNavigation";
 import type { AiProvider } from "../../services/ai";
 
 interface Command {
@@ -61,12 +69,59 @@ interface Command {
   label: string;
   shortcut?: string;
   icon?: ReactNode;
+  subView?: boolean;
   action: () => void;
+}
+
+export type SubView = "search" | "recent" | "theme" | "ai" | "copy";
+type View = "root" | SubView;
+
+const SUB_VIEW_NAMES: Record<SubView, string> = {
+  search: "Search Notes",
+  recent: "Recent Notes",
+  theme: "Theme",
+  ai: "Edit with AI",
+  copy: "Copy / Export",
+};
+
+const AI_PROVIDERS: Record<
+  AiProvider,
+  { label: string; Icon: typeof ClaudeIcon }
+> = {
+  claude: { label: "Claude Code", Icon: ClaudeIcon },
+  codex: { label: "OpenAI Codex", Icon: CodexIcon },
+  opencode: { label: "OpenCode", Icon: OpenCodeIcon },
+  ollama: { label: "Ollama", Icon: OllamaIcon },
+};
+
+/** Wraps each query word found in `text` in a <mark>, ignoring case. */
+function highlight(text: string, query: string): ReactNode {
+  const words = query
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (words.length === 0) return text;
+  // Longest first, so "notes" wins over "no" where both match
+  words.sort((a, b) => b.length - a.length);
+  return text.split(new RegExp(`(${words.join("|")})`, "gi")).map((part, i) =>
+    i % 2 === 1 ? (
+      <mark key={i} className="bg-transparent text-text font-semibold">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  );
 }
 
 interface CommandPaletteProps {
   open: boolean;
+  /** Sub-view to show when the palette opens; root when unset. */
+  initialView?: SubView;
+  navigation: NoteNavigation;
   onClose: () => void;
+  /** Runs when a command opens or creates a note, so App can leave Settings. */
+  onOpenNote: () => void;
   onOpenSettings?: () => void;
   onOpenShortcuts?: () => void;
   onOpenAiModal?: (provider: AiProvider) => void;
@@ -77,7 +132,10 @@ interface CommandPaletteProps {
 
 export function CommandPalette({
   open,
+  initialView,
+  navigation,
   onClose,
+  onOpenNote,
   onOpenSettings,
   onOpenShortcuts,
   onOpenAiModal,
@@ -95,19 +153,29 @@ export function CommandPalette({
     pinNote,
     unpinNote,
     notesFolder,
+    createNoteInFolder,
   } = useNotes();
+  const { recentNotes, parentPageId, goBack, goForward } = navigation;
+  // Cmd+Shift+O opens Recent Notes on the previous note, so Enter switches back
+  const startIndex =
+    initialView === "recent" &&
+    recentNotes.length > 1 &&
+    recentNotes[0].id === currentNote?.id
+      ? 1
+      : 0;
   const { setTheme } = useTheme();
   const { status, gitAvailable, gitEnabled, commit, sync, isSyncing } =
     useGit();
+  const [view, setView] = useState<View>(initialView ?? "root");
   const [query, setQuery] = useState("");
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState(startIndex);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
   const deleteWarning = useDeleteNoteWarning(
     deleteDialogOpen ? noteToDelete : null,
   );
-  const [localSearchResults, setLocalSearchResults] = useState<
-    { id: string; title: string; preview: string; modified: number }[]
+  const [searchResults, setSearchResults] = useState<
+    notesService.SearchResult[]
   >([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [availableAiProviders, setAvailableAiProviders] = useState<
@@ -117,16 +185,33 @@ export function CommandPalette({
   const listRef = useRef<HTMLDivElement>(null);
   const currentNoteId = currentNote?.id;
 
-  // Clear local search on open and close, reset query and selection on open
+  // Clear search on open and close, reset view, query and selection on open
   const [prevOpen, setPrevOpen] = useState(open);
   if (open !== prevOpen) {
     setPrevOpen(open);
-    setLocalSearchResults([]);
+    setSearchResults([]);
     if (open) {
+      setView(initialView ?? "root");
       setQuery("");
-      setSelectedIndex(0);
+      setSelectedIndex(startIndex);
     }
   }
+
+  const openView = useCallback((next: View) => {
+    setView(next);
+    setQuery("");
+    setSelectedIndex(0);
+    setSearchResults([]);
+  }, []);
+
+  const openNote = useCallback(
+    (id: string) => {
+      void selectNote(id);
+      onOpenNote();
+      onClose();
+    },
+    [selectNote, onOpenNote, onClose],
+  );
 
   // Clear AI providers whenever the palette closes or no note is selected
   const canLoadAiProviders = open && !!currentNoteId;
@@ -168,9 +253,38 @@ export function CommandPalette({
     };
   }, [open, currentNoteId]);
 
-  // Memoize commands array
-  const commands = useMemo<Command[]>(() => {
+  // Root commands and the command lists of the Theme, AI, and Copy sub-views
+  const commands = useMemo(() => {
+    const subViewCommand = (
+      subView: SubView,
+      label: string,
+      icon: ReactNode,
+    ): Command => ({
+      id: `view-${subView}`,
+      label,
+      icon,
+      subView: true,
+      action: () => openView(subView),
+    });
+    const aiCommands: Command[] = [];
+    const copyCommands: Command[] = [];
     const baseCommands: Command[] = [
+      {
+        ...subViewCommand(
+          "search",
+          "Search Notes",
+          <SearchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        ),
+        shortcut: `${mod} ${shift} F`,
+      },
+      {
+        ...subViewCommand(
+          "recent",
+          "Recent Notes",
+          <NoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        ),
+        shortcut: `${mod} ${shift} O`,
+      },
       {
         id: "new-note",
         label: "New Note",
@@ -178,6 +292,7 @@ export function CommandPalette({
         icon: <AddNoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
         action: () => {
           void createNote();
+          onOpenNote();
           onClose();
         },
       },
@@ -193,52 +308,74 @@ export function CommandPalette({
       },
     ];
 
+    // Navigation commands, each only when it has somewhere to go
+    if (currentNote) {
+      baseCommands.push({
+        id: "new-sub-page",
+        label: "New Sub-page",
+        shortcut: `${mod} ${shift} N`,
+        icon: <AddNoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          void createNoteInFolder(currentNote.id);
+          onOpenNote();
+          onClose();
+        },
+      });
+    }
+    if (goBack) {
+      baseCommands.push({
+        id: "go-back",
+        label: "Go Back",
+        shortcut: `${mod} [`,
+        icon: <ArrowLeftIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          goBack();
+          onOpenNote();
+          onClose();
+        },
+      });
+    }
+    if (goForward) {
+      baseCommands.push({
+        id: "go-forward",
+        label: "Go Forward",
+        shortcut: `${mod} ]`,
+        icon: <ArrowRightIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          goForward();
+          onOpenNote();
+          onClose();
+        },
+      });
+    }
+    if (parentPageId) {
+      baseCommands.push({
+        id: "go-to-parent",
+        label: "Go to Parent Page",
+        shortcut: `${mod} ${alt} ↑`,
+        icon: <ArrowUpIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => openNote(parentPageId),
+      });
+    }
+
     // Add note-specific commands if a note is selected
     if (currentNote) {
       const isPinned =
         settings?.pinnedNoteIds?.includes(currentNote.id) || false;
-      const aiCommands: Command[] = onOpenAiModal
-        ? availableAiProviders.map((provider) => {
-            const action = () => {
+      if (onOpenAiModal) {
+        for (const provider of availableAiProviders) {
+          const { label, Icon } = AI_PROVIDERS[provider];
+          aiCommands.push({
+            id: `ai-edit-${provider}`,
+            label,
+            icon: <Icon className="w-4.5 h-4.5 fill-text-muted" />,
+            action: () => {
               onOpenAiModal(provider);
               onClose();
-            };
-
-            if (provider === "codex") {
-              return {
-                id: "ai-edit-codex",
-                label: "Edit with OpenAI Codex",
-                icon: <CodexIcon className="w-4.5 h-4.5 fill-text-muted" />,
-                action,
-              };
-            }
-
-            if (provider === "opencode") {
-              return {
-                id: "ai-edit-opencode",
-                label: "Edit with OpenCode",
-                icon: <OpenCodeIcon className="w-4.5 h-4.5 fill-text-muted" />,
-                action,
-              };
-            }
-
-            if (provider === "ollama") {
-              return {
-                id: "ai-edit-ollama",
-                label: "Edit with Ollama",
-                icon: <OllamaIcon className="w-4.5 h-4.5 fill-text-muted" />,
-                action,
-              };
-            }
-
-            return {
-              id: "ai-edit-claude",
-              label: "Edit with Claude Code",
-              icon: <ClaudeIcon className="w-4.5 h-4.5 fill-text-muted" />,
-              action,
-            };
-          })
-        : [];
+            },
+          });
+        }
+      }
 
       baseCommands.push(
         {
@@ -259,16 +396,26 @@ export function CommandPalette({
             }
           },
         },
-        ...aiCommands,
+        ...(aiCommands.length > 0
+          ? [
+              subViewCommand(
+                "ai",
+                "Edit with AI...",
+                <PencilIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+              ),
+            ]
+          : []),
         {
           id: "duplicate-note",
           label: "Duplicate Current Note",
+          shortcut: `${mod} D`,
           icon: <CopyIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
           action: async () => {
             try {
               const newNote = await duplicateNote(currentNote.id);
               await refreshNotes();
               void selectNote(newNote.id);
+              onOpenNote();
               onClose();
             } catch (error) {
               console.error("Failed to duplicate note:", error);
@@ -284,6 +431,14 @@ export function CommandPalette({
             setDeleteDialogOpen(true);
           },
         },
+        subViewCommand(
+          "copy",
+          "Copy / Export...",
+          <FileExportIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        ),
+      );
+
+      copyCommands.push(
         {
           id: "copy-markdown",
           label: "Copy Markdown",
@@ -496,40 +651,42 @@ export function CommandPalette({
           onClose();
         },
       },
-      {
-        id: "theme-light",
-        label: `Switch Theme to Light Mode`,
-        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
-        action: () => {
-          setTheme("light");
-          onClose();
-        },
-      },
-      {
-        id: "theme-dark",
-        label: `Switch Theme to Dark Mode`,
-        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
-        action: () => {
-          setTheme("dark");
-          onClose();
-        },
-      },
-      {
-        id: "theme-system",
-        label: `Switch Theme to System Mode`,
-        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
-        action: () => {
-          setTheme("system");
-          onClose();
-        },
-      },
+      subViewCommand(
+        "theme",
+        "Theme...",
+        <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+      ),
     );
 
-    return baseCommands;
+    const themeCommands = (["light", "dark", "system"] as const).map(
+      (mode): Command => ({
+        id: `theme-${mode}`,
+        label: mode.charAt(0).toUpperCase() + mode.slice(1),
+        icon: <SwatchIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          setTheme(mode);
+          onClose();
+        },
+      }),
+    );
+
+    return {
+      root: baseCommands,
+      theme: themeCommands,
+      ai: aiCommands,
+      copy: copyCommands,
+    };
   }, [
+    openView,
+    openNote,
     createNote,
+    createNoteInFolder,
+    goBack,
+    goForward,
+    parentPageId,
     currentNote,
     onClose,
+    onOpenNote,
     onOpenSettings,
     onOpenAiModal,
     availableAiProviders,
@@ -552,78 +709,75 @@ export function CommandPalette({
     editorRef,
   ]);
 
-  // Debounced search using Tantivy (local state, doesn't affect sidebar)
+  // Debounced full-content search, only in the Search Notes sub-view
   useEffect(() => {
     const trimmed = query.trim();
-    if (!open || !trimmed) return undefined;
+    if (!open || view !== "search" || !trimmed) return undefined;
 
-    // Debounce search calls
+    // A response for an older query must not replace newer results
+    let current = true;
     const timer = setTimeout(async () => {
       try {
-        const results = await invoke<
-          {
-            id: string;
-            title: string;
-            preview: string;
-            modified: number;
-            score: number;
-          }[]
-        >("search_notes", { query: trimmed });
-        setLocalSearchResults(results);
+        const results = await notesService.searchNotes(trimmed);
+        if (current) setSearchResults(results);
       } catch (err) {
         console.error("Search failed:", err);
       }
     }, 150);
 
-    return () => clearTimeout(timer);
-  }, [query, open]);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [query, open, view]);
 
-  // Use search results when searching, otherwise show all notes
-  const filteredNotes = useMemo(() => {
-    if (!query.trim()) return notes;
-    return localSearchResults;
-  }, [query, notes, localSearchResults]);
+  const visibleCommands = useMemo(() => {
+    const list = view === "search" || view === "recent" ? [] : commands[view];
+    const lower = query.trim().toLowerCase();
+    if (!lower) return list;
+    return list.filter((cmd) => cmd.label.toLowerCase().includes(lower));
+  }, [view, commands, query]);
 
-  // Memoize filtered commands
-  const filteredCommands = useMemo(() => {
-    if (!query.trim()) return commands;
-    const queryLower = query.toLowerCase();
-    return commands.filter((cmd) =>
-      cmd.label.toLowerCase().includes(queryLower),
-    );
-  }, [query, commands]);
+  // Root and Recent Notes filter titles in memory; Search Notes asks the backend
+  const visibleNotes = useMemo<NoteMetadata[]>(() => {
+    const lower = query.trim().toLowerCase();
+    const byTitle = (list: NoteMetadata[]) =>
+      list.filter((note) =>
+        cleanTitle(note.title).toLowerCase().includes(lower),
+      );
+    switch (view) {
+      case "root":
+        return lower ? byTitle(notes).slice(0, 10) : recentNotes.slice(0, 5);
+      case "recent":
+        return byTitle(recentNotes);
+      case "search":
+        return lower ? searchResults : recentNotes.slice(0, 9);
+      default:
+        return [];
+    }
+  }, [view, query, notes, recentNotes, searchResults]);
 
-  // Memoize all items (commands first, then notes)
-  const allItems = useMemo(
-    () => [
-      ...filteredCommands.map((cmd) => ({
-        type: "command" as const,
-        id: cmd.id,
-        label: cmd.label,
-        shortcut: cmd.shortcut,
-        icon: cmd.icon,
-        action: cmd.action,
-      })),
-      ...filteredNotes.slice(0, 10).map((note) => ({
-        type: "note" as const,
-        id: note.id,
-        label: cleanTitle(note.title),
-        preview: note.preview,
-        action: () => {
-          void selectNote(note.id);
-          onClose();
-        },
-      })),
-    ],
-    [filteredNotes, filteredCommands, selectNote, onClose],
+  const rowCount = visibleCommands.length + visibleNotes.length;
+
+  const runRow = useCallback(
+    (index: number) => {
+      if (index < visibleCommands.length) {
+        visibleCommands[index].action();
+        return;
+      }
+      const note = visibleNotes[index - visibleCommands.length];
+      if (note) openNote(note.id);
+    },
+    [visibleCommands, visibleNotes, openNote],
   );
 
-  // Focus input when opened
+  // Focus input when opened, and again on entering a sub-view by clicking its row
   useEffect(() => {
     if (open) {
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, [open]);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- view is a deliberate refocus trigger
+  }, [open, view]);
 
   // Scroll selected item into view
   useEffect(() => {
@@ -651,11 +805,23 @@ export function CommandPalette({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      // Cmd+1-9 runs the row in that slot. Stopping the event keeps App and
+      // Settings (which binds Cmd+1-5 to tabs) from handling it too.
+      if (
+        view !== "root" &&
+        (e.metaKey || e.ctrlKey) &&
+        /^[1-9]$/.test(e.key)
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        runRow(Number(e.key) - 1);
+        return;
+      }
       switch (e.key) {
         case "ArrowDown":
           e.preventDefault();
           e.stopPropagation();
-          setSelectedIndex((i) => Math.min(i + 1, allItems.length - 1));
+          setSelectedIndex((i) => Math.max(0, Math.min(i + 1, rowCount - 1)));
           break;
         case "ArrowUp":
           e.preventDefault();
@@ -665,30 +831,50 @@ export function CommandPalette({
         case "Enter":
           e.preventDefault();
           e.stopPropagation();
-          if (allItems[selectedIndex]) {
-            allItems[selectedIndex].action();
-          }
+          runRow(selectedIndex);
           break;
         case "Escape":
           e.preventDefault();
           e.stopPropagation();
-          onClose();
+          if (view === "root") onClose();
+          else openView("root");
+          break;
+        case "Backspace":
+          if (view !== "root" && query === "") {
+            e.preventDefault();
+            e.stopPropagation();
+            openView("root");
+          }
           break;
       }
     },
-    [allItems, selectedIndex, onClose],
+    [view, query, rowCount, selectedIndex, runRow, onClose, openView],
   );
 
   if (!open) return null;
 
-  const commandsCount = filteredCommands.length;
+  const commandsCount = visibleCommands.length;
+  const highlightQuery = view === "search" ? query.trim() : "";
+  // Root rows show their own shortcut; sub-view rows show their Cmd+1-9 slot
+  const shortcutFor = (index: number, own?: string) => {
+    if (view === "root") return own;
+    return index < 9 ? `${mod} ${index + 1}` : undefined;
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center py-11 px-4 pointer-events-none">
       {/* Palette */}
-      <div className="relative w-full h-full max-h-108 max-w-2xl bg-bg rounded-xl shadow-2xl overflow-hidden border border-border animate-slide-down flex flex-col pointer-events-auto">
-        {/* Search input */}
-        <div className="border-b border-border flex-none">
+      <div
+        data-command-menu
+        className="relative w-full h-full max-h-108 max-w-2xl bg-bg rounded-xl shadow-2xl overflow-hidden border border-border animate-slide-down flex flex-col pointer-events-auto"
+      >
+        {/* Search input, with the sub-view name as a chip */}
+        <div className="border-b border-border flex-none flex items-center">
+          {view !== "root" && (
+            <span className="ml-4 shrink-0 rounded-md bg-bg-muted px-2 py-0.5 text-sm font-medium text-text">
+              {SUB_VIEW_NAMES[view]}
+            </span>
+          )}
           <input
             ref={inputRef}
             type="text"
@@ -696,38 +882,47 @@ export function CommandPalette({
             onChange={(e) => {
               setQuery(e.target.value);
               setSelectedIndex(0);
-              if (!e.target.value.trim()) setLocalSearchResults([]);
+              if (!e.target.value.trim()) setSearchResults([]);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Search notes or type a command..."
+            placeholder={
+              view === "root"
+                ? "Search notes or type a command..."
+                : view === "search"
+                  ? "Search note contents..."
+                  : "Type to filter..."
+            }
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
-            className="w-full px-4.5 py-3.5 text-[17px] bg-transparent outline-none text-text placeholder-text-muted/50"
+            className="flex-1 min-w-0 px-4.5 py-3.5 text-[17px] bg-transparent outline-none text-text placeholder-text-muted/50"
           />
         </div>
 
         {/* Results */}
         <div ref={listRef} className="overflow-y-auto h-full p-2.5 flex-1">
-          {allItems.length === 0 ? (
+          {rowCount === 0 ? (
             <div className="text-sm font-medium opacity-50 text-text-muted p-2">
               No results found
             </div>
           ) : (
             <>
               {/* Commands section */}
-              {filteredCommands.length > 0 && (
+              {visibleCommands.length > 0 && (
                 <div className="space-y-0.5 mb-5">
-                  <div className="text-sm font-medium text-text-muted px-2.5 py-1.5">
-                    Commands
-                  </div>
-                  {filteredCommands.map((cmd, i) => {
+                  {view === "root" && (
+                    <div className="text-sm font-medium text-text-muted px-2.5 py-1.5">
+                      Commands
+                    </div>
+                  )}
+                  {visibleCommands.map((cmd, i) => {
                     return (
                       <div key={cmd.id} data-index={i}>
                         <CommandItem
                           label={cmd.label}
-                          shortcut={cmd.shortcut}
+                          shortcut={shortcutFor(i, cmd.shortcut)}
+                          subView={cmd.subView}
                           icon={cmd.icon}
                           isSelected={selectedIndex === i}
                           onClick={cmd.action}
@@ -739,12 +934,14 @@ export function CommandPalette({
               )}
 
               {/* Notes section */}
-              {filteredNotes.length > 0 && (
+              {visibleNotes.length > 0 && (
                 <div className="space-y-0.5">
-                  <div className="text-sm font-medium text-text-muted px-2.5 py-1.5">
-                    Notes
-                  </div>
-                  {filteredNotes.slice(0, 10).map((note, i) => {
+                  {view === "root" && (
+                    <div className="text-sm font-medium text-text-muted px-2.5 py-1.5">
+                      Notes
+                    </div>
+                  )}
+                  {visibleNotes.map((note, i) => {
                     const title = cleanTitle(note.title);
                     const firstLetter = title.charAt(0).toUpperCase();
                     // Clean subtitle: treat whitespace-only or &nbsp; as empty
@@ -757,11 +954,15 @@ export function CommandPalette({
                       <div key={note.id} data-index={index}>
                         <CommandItem
                           label={title}
-                          subtitle={cleanSubtitle}
+                          subtitle={
+                            cleanSubtitle &&
+                            highlight(cleanSubtitle, highlightQuery)
+                          }
+                          shortcut={shortcutFor(index)}
                           iconText={firstLetter}
                           variant="note"
                           isSelected={selectedIndex === index}
-                          onClick={allItems[index].action}
+                          onClick={() => openNote(note.id)}
                         />
                       </div>
                     );
@@ -770,6 +971,20 @@ export function CommandPalette({
               )}
             </>
           )}
+        </div>
+
+        {/* Key hints */}
+        <div className="flex-none border-t border-border px-4.5 py-2 flex items-center gap-4 text-xs text-text-muted">
+          {[
+            ["↑↓", "Navigate"],
+            ["↵", "Select"],
+            ["Esc", view === "root" ? "Close" : "Back"],
+          ].map(([key, action]) => (
+            <span key={action} className="flex items-center gap-1.5">
+              <kbd className="px-1.5 py-0.5 rounded-md bg-bg-muted">{key}</kbd>
+              {action}
+            </span>
+          ))}
         </div>
       </div>
 

@@ -1,4 +1,4 @@
-import { mod, shift } from "./platform";
+import { alt, mod, shift } from "./platform";
 
 export interface Shortcut {
   keys: string[];
@@ -14,8 +14,13 @@ export const shortcutCategories: ShortcutCategory[] = [
   {
     title: "Navigation",
     shortcuts: [
-      { keys: [mod, "P"], description: "Command palette" },
+      { keys: [mod, "K"], description: "Command menu" },
+      { keys: [mod, "1-9"], description: "Run a row in a menu sub-view" },
       { keys: [mod, shift, "F"], description: "Search notes" },
+      { keys: [mod, shift, "O"], description: "Recent notes" },
+      { keys: [mod, "["], description: "Back" },
+      { keys: [mod, "]"], description: "Forward" },
+      { keys: [mod, alt, "↑"], description: "Go to parent page" },
       { keys: [mod, "\\"], description: "Toggle sidebar" },
       { keys: [mod, ","], description: "Settings" },
       { keys: [mod, "/"], description: "Keyboard shortcuts" },
@@ -29,6 +34,7 @@ export const shortcutCategories: ShortcutCategory[] = [
     title: "Notes",
     shortcuts: [
       { keys: [mod, "N"], description: "New note" },
+      { keys: [mod, shift, "N"], description: "New sub-page" },
       { keys: [mod, "D"], description: "Duplicate note" },
       { keys: [mod, "R"], description: "Reload note" },
       { keys: ["Delete"], description: "Delete note" },
@@ -43,7 +49,7 @@ export const shortcutCategories: ShortcutCategory[] = [
     shortcuts: [
       { keys: [mod, "B"], description: "Bold" },
       { keys: [mod, "I"], description: "Italic" },
-      { keys: [mod, "K"], description: "Add / edit link" },
+      { keys: [mod, shift, "L"], description: "Add / edit link" },
       { keys: [mod, "F"], description: "Find in note" },
       { keys: [mod, shift, "C"], description: "Copy & Export" },
       { keys: [mod, shift, "P"], description: "Print / Export as PDF" },
@@ -55,10 +61,11 @@ export const shortcutCategories: ShortcutCategory[] = [
   {
     title: "Settings",
     shortcuts: [
-      { keys: [mod, "1"], description: "General" },
-      { keys: [mod, "2"], description: "Appearance" },
-      { keys: [mod, "3"], description: "Shortcuts" },
-      { keys: [mod, "4"], description: "About" },
+      { keys: [mod, "1"], description: "Folder" },
+      { keys: [mod, "2"], description: "Integrations" },
+      { keys: [mod, "3"], description: "Appearance" },
+      { keys: [mod, "4"], description: "Shortcuts" },
+      { keys: [mod, "5"], description: "About" },
     ],
   },
   {

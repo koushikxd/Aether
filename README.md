@@ -73,8 +73,8 @@ Aether is designed to be usable without a mouse. Here are the essentials to get 
 | `Cmd+D`           | Duplicate note         |
 | `Delete`          | Delete note            |
 | `Cmd+Backspace`   | Delete note            |
-| `Cmd+P`           | Command palette        |
-| `Cmd+K`           | Add/edit link          |
+| `Cmd+K`           | Command menu           |
+| `Cmd+Shift+L`     | Add/edit link          |
 | `Cmd+F`           | Find in note           |
 | `Cmd+Shift+C`     | Copy & Export menu     |
 | `Cmd+Shift+M`     | Toggle Markdown source |
@@ -89,7 +89,7 @@ Aether is designed to be usable without a mouse. Here are the essentials to get 
 
 **Note:** On Windows, use `Ctrl` instead of `Cmd` for all shortcuts.
 
-Many more shortcuts and features are available in the app—explore via the command palette (`Cmd+P` / `Ctrl+P`) or view the full reference in Settings → Shortcuts.
+Many more shortcuts and features are available in the app—explore via the command menu (`Cmd+K` / `Ctrl+K`) or view the full reference in Settings → Shortcuts.
 
 ## Built With
 

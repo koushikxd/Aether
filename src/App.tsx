@@ -11,7 +11,10 @@ import { SIDEBAR_DEFAULT_PX } from "./lib/sidebar";
 import { Editor } from "./components/editor/Editor";
 import type { Editor as TiptapEditor } from "@tiptap/react";
 import { FolderPicker } from "./components/layout/FolderPicker";
-import { CommandPalette } from "./components/command-palette/CommandPalette";
+import {
+  CommandPalette,
+  type SubView,
+} from "./components/command-palette/CommandPalette";
 import { SettingsPage } from "./components/settings";
 import {
   SpinnerIcon,
@@ -32,6 +35,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as aiService from "./services/ai";
 import type { AiProvider } from "./services/ai";
 import { isMac, isWindows } from "./lib/platform";
+import { useNoteNavigation } from "./lib/noteNavigation";
 
 // Detect preview mode from URL search params
 function getWindowMode(): {
@@ -58,12 +62,12 @@ function AppContent() {
     notes,
     selectedNoteId,
     selectNote,
-    searchQuery,
-    searchResults,
     reloadCurrentNote,
     currentNote,
     syncNotesFolder,
+    createNoteInFolder,
   } = useNotes();
+  const navigation = useNoteNavigation();
   const { interfaceZoom, setInterfaceZoom, reloadSettings } = useTheme();
   const interfaceZoomRef = useRef(interfaceZoom);
   const currentNoteRef = useRef(currentNote);
@@ -72,6 +76,14 @@ function AppContent() {
     currentNoteRef.current = currentNote;
   }, [interfaceZoom, currentNote]);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteView, setPaletteView] = useState<SubView>();
+  // Bumped to remount an open palette in the requested sub-view
+  const [paletteKey, setPaletteKey] = useState(0);
+  const openPaletteIn = useCallback((subView: SubView) => {
+    setPaletteView(subView);
+    setPaletteKey((k) => k + 1);
+    setPaletteOpen(true);
+  }, []);
   const [view, setView] = useState<ViewState>("notes");
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [aiModalOpen, setAiModalOpen] = useState(false);
@@ -196,11 +208,6 @@ function AppContent() {
     [aiProvider, currentNote, reloadCurrentNote],
   );
 
-  // Memoize display items to prevent unnecessary recalculations
-  const displayItems = useMemo(() => {
-    return searchQuery.trim() ? searchResults : notes;
-  }, [searchQuery, searchResults, notes]);
-
   // Global keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -253,6 +260,13 @@ function AppContent() {
         return;
       }
 
+      // Cmd+K - Open command menu (works everywhere, including settings)
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === "k") {
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+
       // Block all other shortcuts when in settings view
       if (view === "settings") {
         return;
@@ -295,13 +309,6 @@ function AppContent() {
         return;
       }
 
-      // Cmd+P - Open command palette
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === "p") {
-        e.preventDefault();
-        setPaletteOpen(true);
-        return;
-      }
-
       // Cmd+Shift+P - Print
       if (
         (e.metaKey || e.ctrlKey) &&
@@ -320,15 +327,52 @@ function AppContent() {
         return;
       }
 
-      // Cmd/Ctrl+Shift+F - Open sidebar search
+      // Cmd/Ctrl+Shift+F - Open the command menu in Search Notes
       if (
         (e.metaKey || e.ctrlKey) &&
         e.shiftKey &&
         e.key.toLowerCase() === "f"
       ) {
         e.preventDefault();
-        setSidebarVisible(true);
-        window.dispatchEvent(new CustomEvent("open-sidebar-search"));
+        openPaletteIn("search");
+        return;
+      }
+
+      // Cmd+Shift+O - Recent Notes, on the previous note
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "o"
+      ) {
+        e.preventDefault();
+        openPaletteIn("recent");
+        return;
+      }
+
+      // Cmd+[ / Cmd+] - Back / forward through opened notes
+      if ((e.metaKey || e.ctrlKey) && (e.key === "[" || e.key === "]")) {
+        e.preventDefault();
+        if (e.key === "[") navigation.goBack?.();
+        else navigation.goForward?.();
+        return;
+      }
+
+      // Cmd+Alt+Up - Go to the parent page
+      if ((e.metaKey || e.ctrlKey) && e.altKey && e.key === "ArrowUp") {
+        e.preventDefault();
+        if (navigation.parentPageId) void selectNote(navigation.parentPageId);
+        return;
+      }
+
+      // Cmd+Shift+N - New sub-page of the open note. Checked before Cmd+N,
+      // which does not look at Shift.
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "n"
+      ) {
+        e.preventDefault();
+        if (selectedNoteId) void createNoteInFolder(selectedNoteId);
         return;
       }
 
@@ -385,26 +429,22 @@ function AppContent() {
       // Skip if folder tree view is handling its own navigation
       const isInFolderTree = !!target.closest("[data-folder-tree]");
       if (
-        displayItems.length > 0 &&
+        notes.length > 0 &&
         (e.key === "ArrowDown" || e.key === "ArrowUp") &&
         ((!isInEditor && !isInInput) || isEditorEmpty) &&
         !isInFolderTree
       ) {
         e.preventDefault();
-        const currentIndex = displayItems.findIndex(
-          (n) => n.id === selectedNoteId,
-        );
+        const currentIndex = notes.findIndex((n) => n.id === selectedNoteId);
         let newIndex: number;
 
         if (e.key === "ArrowDown") {
-          newIndex =
-            currentIndex < displayItems.length - 1 ? currentIndex + 1 : 0;
+          newIndex = currentIndex < notes.length - 1 ? currentIndex + 1 : 0;
         } else {
-          newIndex =
-            currentIndex > 0 ? currentIndex - 1 : displayItems.length - 1;
+          newIndex = currentIndex > 0 ? currentIndex - 1 : notes.length - 1;
         }
 
-        void selectNote(displayItems[newIndex].id);
+        void selectNote(notes[newIndex].id);
         window.dispatchEvent(new CustomEvent("focus-note-list"));
         return;
       }
@@ -452,8 +492,11 @@ function AppContent() {
     };
   }, [
     createNote,
+    createNoteInFolder,
     duplicateNote,
-    displayItems,
+    navigation,
+    notes,
+    openPaletteIn,
     reloadCurrentNote,
     selectedNoteId,
     selectNote,
@@ -467,6 +510,7 @@ function AppContent() {
 
   const handleClosePalette = useCallback(() => {
     setPaletteOpen(false);
+    setPaletteView(undefined);
     editorRef.current?.commands.focus();
   }, []);
 
@@ -535,9 +579,13 @@ function AppContent() {
       />
 
       <CommandPalette
+        key={paletteKey}
         open={paletteOpen}
+        initialView={paletteView}
+        navigation={navigation}
         onClose={handleClosePalette}
         onOpenSettings={toggleSettings}
+        onOpenNote={closeSettings}
         onOpenShortcuts={() => setShortcutsOpen(true)}
         onOpenAiModal={(provider) => {
           setAiProvider(provider);

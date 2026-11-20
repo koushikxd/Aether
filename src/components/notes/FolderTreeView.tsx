@@ -832,6 +832,10 @@ export function FolderTreeView({
       ) {
         return;
       }
+      // Leave modified arrows to App, which binds Cmd+Alt+Up to the parent page
+      if (e.key.startsWith("Arrow") && (e.metaKey || e.ctrlKey || e.altKey)) {
+        return;
+      }
 
       if (e.key === "Escape") {
         if (multiSelectedNoteIds.size > 1) {

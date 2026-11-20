@@ -632,6 +632,147 @@ fn search_index_follows_page_renames_and_deletes() {
     assert!(search(&notes, "zebra").is_empty());
 }
 
+/// Indexes the notes folder and fills the notes cache, as the app does on
+/// start. Keep the returned dir alive while searching.
+fn index_notes(notes: &TestNotes) -> tempfile::TempDir {
+    let index_dir = tempfile::TempDir::new().expect("index dir");
+    let index = crate::SearchIndex::new(&index_dir.path().to_path_buf()).expect("index");
+    index.rebuild_index(&notes.root().to_path_buf(), &[]).expect("rebuild");
+    *notes.state().search_index.lock().expect("search index mutex") = Some(index);
+    run(crate::list_notes(notes.state())).expect("list_notes");
+    index_dir
+}
+
+fn search_notes(notes: &TestNotes, query: &str) -> Vec<crate::SearchResult> {
+    let state = notes.state();
+    state
+        .search_index
+        .lock()
+        .expect("search index mutex")
+        .as_ref()
+        .expect("search index")
+        .reader
+        .reload()
+        .expect("reload reader");
+    run(crate::search_notes(query.to_string(), notes.state())).expect("search_notes")
+}
+
+#[test]
+fn search_matches_typed_words_in_order_with_a_partial_last_word() {
+    let notes = TestNotes::new();
+    notes.write("Standup.md", "# Standup\n\nThe meeting notes are here.\n");
+    notes.write("Agenda.md", "# Agenda\n\nA meeting about the roadmap.\n");
+    let _index_dir = index_notes(&notes);
+
+    assert_eq!(search(&notes, "meeting no"), ["Standup"]);
+    assert_eq!(search(&notes, "meet"), ["Agenda", "Standup"]);
+}
+
+#[test]
+fn search_does_not_match_words_out_of_order() {
+    let notes = TestNotes::new();
+    notes.write("Standup.md", "# Standup\n\nThe meeting notes are here.\n");
+    let _index_dir = index_notes(&notes);
+
+    assert!(search(&notes, "notes meeting").is_empty());
+    assert!(search_notes(&notes, "notes meeting").is_empty());
+}
+
+#[test]
+fn search_ranks_title_matches_above_body_matches() {
+    let notes = TestNotes::new();
+    notes.write(
+        "Meeting Notes.md",
+        &format!("# Meeting Notes\n\n{}\n", "A long body about other things. ".repeat(20)),
+    );
+    notes.write("Weekly.md", "# Weekly\n\nmeeting notes, meeting notes, meeting notes\n");
+    for i in 0..20 {
+        notes.write(&format!("Other {i}.md"), &format!("# Other {i}\n\nunrelated text\n"));
+    }
+    let _index_dir = index_notes(&notes);
+
+    let results = search_notes(&notes, "meeting notes");
+    crate::test_support::save_text_artifact(
+        "search_ranks_title_matches_above_body_matches",
+        &format!("{results:#?}"),
+    );
+    let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["Meeting Notes", "Weekly"]);
+}
+
+#[test]
+fn search_preview_is_a_snippet_around_the_match() {
+    let notes = TestNotes::new();
+    notes.write(
+        "Log.md",
+        &format!(
+            "# Log\n\n{}\n\nWe wrote meeting notes today.\n",
+            "Filler sentence about the garden. ".repeat(10)
+        ),
+    );
+    let _index_dir = index_notes(&notes);
+
+    let phrase = search_notes(&notes, "meeting no");
+    let prefix = search_notes(&notes, "meet");
+    crate::test_support::save_text_artifact(
+        "search_preview_is_a_snippet_around_the_match",
+        &format!("{phrase:#?}\n{prefix:#?}"),
+    );
+    assert!(phrase[0].preview.contains("meeting notes"), "{:?}", phrase[0].preview);
+    assert!(prefix[0].preview.contains("meeting"), "{:?}", prefix[0].preview);
+}
+
+#[test]
+fn search_preview_is_the_line_holding_the_phrase() {
+    let notes = TestNotes::new();
+    notes.write(
+        "Log.md",
+        &format!(
+            "# Log\n\n{}\n\n{}\n\nWe wrote meeting notes today.\n",
+            "meeting tomorrow, ".repeat(10),
+            "Filler sentence about the garden. ".repeat(8)
+        ),
+    );
+    let _index_dir = index_notes(&notes);
+
+    let results = search_notes(&notes, "meeting no");
+    crate::test_support::save_text_artifact(
+        "search_preview_is_the_line_holding_the_phrase",
+        &format!("{results:#?}"),
+    );
+    assert!(results[0].preview.contains("meeting notes"), "{:?}", results[0].preview);
+}
+
+#[test]
+fn search_expands_a_partial_word_past_fifty_completions() {
+    let notes = TestNotes::new();
+    // 78 words that sort before "notes" and share its "no" prefix
+    let words: Vec<String> = ('a'..='c')
+        .flat_map(|a| ('a'..='z').map(move |b| format!("no{a}{b}")))
+        .collect();
+    notes.write(
+        "Standup.md",
+        &format!("# Standup\n\nThe meeting notes are here.\n\n{}\n", words.join(" ")),
+    );
+    let _index_dir = index_notes(&notes);
+
+    // The index alone, so the substring fallback cannot hide a miss
+    assert_eq!(search(&notes, "meeting no"), ["Standup"]);
+}
+
+#[test]
+fn search_falls_back_to_substring_matching_when_the_index_finds_nothing() {
+    let notes = TestNotes::new();
+    notes.write("Standup.md", "# Standup\n\nFirst paragraph.\n\nThe meeting notes are here.\n");
+    let _index_dir = index_notes(&notes);
+
+    assert!(search(&notes, "eting no").is_empty());
+    let results = search_notes(&notes, "eting no");
+    let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["Standup"]);
+    assert_eq!(results[0].preview, "The meeting notes are here.");
+}
+
 const PLAN: &str = "# Plan
 
 <img src=\"../../assets/chart.png\" width=\"320\">

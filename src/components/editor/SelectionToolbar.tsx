@@ -205,7 +205,7 @@ export const SelectionToolbar = memo(function SelectionToolbar({
       </DropdownMenu.Root>
       <div className="w-px h-4.5 bg-border mx-1" />
       <ToolbarButton
-        title={`Link (${shortcut(mod, "K")})`}
+        title={`Link (${shortcut(mod, shift, "L")})`}
         isActive={active.link}
         onClick={onLink}
       >

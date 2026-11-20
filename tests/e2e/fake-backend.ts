@@ -520,6 +520,21 @@ function subPageCounts(args: Args): { subPages: number; otherFiles: number } {
   return counts;
 }
 
+// Case-insensitive substring match over each line, title line included (the
+// Rust phrase matching has its own tests). `preview` is the first matching line.
+function searchNotes(args: Args) {
+  const query = str(args, "query").trim().toLowerCase();
+  return Object.keys(files)
+    .filter(isNoteFile)
+    .flatMap((path) => {
+      const lines = stripFrontmatter(files[path]).split("\n");
+      const line = lines.find((l) => l.toLowerCase().includes(query));
+      if (line === undefined) return [];
+      const meta = metadata(path.slice(0, -3));
+      return [{ ...meta, preview: line.trim(), score: 1 }];
+    });
+}
+
 // Calls waiting on a held command, run in order on release.
 const held = new Map<string, (() => void)[]>();
 
@@ -562,6 +577,7 @@ const handlers: Record<string, Handler> = {
     return note(id);
   },
   save_note: saveNote,
+  search_notes: searchNotes,
   create_note: createNote,
   delete_note: deleteNote,
   sub_page_counts: subPageCounts,
