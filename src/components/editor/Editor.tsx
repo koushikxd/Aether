@@ -62,6 +62,8 @@ function isAllowedUrlScheme(url: string): boolean {
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { useOptionalNotes } from "../../context/NotesContext";
+import { useOptionalTabs } from "../../context/TabsContext";
+import { TabStrip } from "./TabStrip";
 import { useTheme } from "../../context/ThemeContext";
 import { Frontmatter } from "./Frontmatter";
 import { BlockMathEditor } from "./BlockMathEditor";
@@ -88,6 +90,8 @@ import {
 } from "./MathExtensions";
 import { cn } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
+import { formatDateTime } from "../../lib/dates";
+import { NoteInfoPanel } from "./NoteInfoPanel";
 import {
   assetUrl,
   changedTargets,
@@ -124,18 +128,6 @@ import {
   MarkdownOffIcon,
   FolderPlusIcon,
 } from "../icons";
-
-function formatDateTime(timestamp: number): string {
-  const date = new Date(timestamp * 1000);
-  return date.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
 
 function focusAndSelectTitle(editor: TiptapEditor): boolean {
   let titleFrom = -1;
@@ -407,6 +399,9 @@ export function Editor({
   notesRef.current = notes;
   const notesCtxRef = useRef(notesCtx);
   notesCtxRef.current = notesCtx;
+  const tabs = useOptionalTabs();
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
 
   // Keep ref in sync with current note ID
   currentNoteIdRef.current = currentNote?.id ?? null;
@@ -1405,6 +1400,15 @@ export function Editor({
   useEffect(() => {
     if (!editor) return undefined;
 
+    // Cmd+click opens a linked note in a new tab
+    const openLinkedNote = (id: string, e: MouseEvent) => {
+      if ((e.metaKey || e.ctrlKey) && tabsRef.current) {
+        tabsRef.current.openInNewTab(id);
+      } else {
+        void notesCtxRef.current?.selectNote(id);
+      }
+    };
+
     const handleEditorClick = (e: MouseEvent) => {
       const target = e.target;
       if (!(target instanceof Element)) return;
@@ -1420,7 +1424,7 @@ export function Editor({
             (n) => n.title.toLowerCase() === noteTitle.toLowerCase(),
           );
           if (note) {
-            void notesCtxRef.current?.selectNote(note.id);
+            openLinkedNote(note.id, e);
           } else {
             toast.info(`Note "${noteTitle}" does not exist yet`);
           }
@@ -1437,7 +1441,7 @@ export function Editor({
           fromId && linkedNoteId(link.getAttribute("href") ?? "", fromId);
         if (linkedId && notesCtxRef.current) {
           if (notesRef.current?.some((n) => n.id === linkedId)) {
-            void notesCtxRef.current.selectNote(linkedId);
+            openLinkedNote(linkedId, e);
           } else {
             toast.info(`Note "${linkedId}" does not exist`);
           }
@@ -1542,8 +1546,10 @@ export function Editor({
       editor.commands.setContent(currentNote.content);
     }
 
-    // Scroll to top after content is set (must be after setContent to work reliably)
-    scrollContainerRef.current?.scrollTo(0, 0);
+    // Scroll to top, or where the tab was left, after content is set (must be
+    // after setContent to work reliably)
+    const scrollTop = tabsRef.current?.takeScrollRestore(loadingNoteId) ?? 0;
+    scrollContainerRef.current?.scrollTo(0, scrollTop);
 
     // Capture note ID to check in RAF callback - prevents race condition
     // if user switches notes quickly before RAF fires
@@ -1554,7 +1560,7 @@ export function Editor({
       }
 
       // Scroll again in RAF to ensure it takes effect after DOM updates
-      scrollContainerRef.current?.scrollTo(0, 0);
+      scrollContainerRef.current?.scrollTo(0, scrollTop);
 
       isLoadingRef.current = false;
 
@@ -1833,6 +1839,7 @@ export function Editor({
           })
           .unsetMark("link")
           .run();
+        tabsRef.current?.openInNewTab(subPage.id);
       } catch (error) {
         console.error("Failed to create sub-page:", error);
         toast.error(errorMessage(error, "Failed to create sub-page"));
@@ -2317,7 +2324,8 @@ export function Editor({
         data-tauri-drag-region
       >
         <div
-          className={`titlebar-no-drag flex items-center gap-1 min-w-0 transition-opacity duration-400 ${needsSidebarDelay ? "delay-200" : ""} ${focusMode ? "opacity-0 pointer-events-none" : "opacity-100"}`}
+          className={`flex-1 h-full flex items-center gap-1 min-w-0 mr-2 transition-opacity duration-400 ${needsSidebarDelay ? "delay-200" : ""} ${focusMode ? "opacity-0 pointer-events-none" : "opacity-100"}`}
+          data-tauri-drag-region
         >
           {onToggleSidebar && (
             <IconButton
@@ -2327,14 +2335,18 @@ export function Editor({
                   ? `Hide sidebar (${mod}${isMac ? "" : "+"}\\)`
                   : `Show sidebar (${mod}${isMac ? "" : "+"}\\)`
               }
-              className="shrink-0"
+              className="titlebar-no-drag shrink-0"
             >
               <PanelLeftIcon className="w-4.5 h-4.5 stroke-[1.5]" />
             </IconButton>
           )}
-          <span className="text-xs text-text-muted mb-px truncate">
-            {formatDateTime(currentNote.modified)}
-          </span>
+          {tabs ? (
+            <TabStrip />
+          ) : (
+            <span className="text-xs text-text-muted mb-px truncate">
+              {formatDateTime(currentNote.modified)}
+            </span>
+          )}
         </div>
         <div
           className={`titlebar-no-drag flex items-center gap-px shrink-0 transition-opacity duration-400 ${needsSidebarDelay ? "delay-200" : ""} ${focusMode ? "opacity-0 pointer-events-none" : "opacity-100"}`}
@@ -2422,6 +2434,17 @@ export function Editor({
                 )}
               </IconButton>
             </Tooltip>
+          )}
+          {currentNote && !previewMode && (
+            <NoteInfoPanel
+              noteId={currentNote.id}
+              modified={currentNote.modified}
+              getText={() =>
+                sourceMode
+                  ? plainTextFromMarkdown(sourceContent)
+                  : (editor?.getText({ blockSeparator: "\n" }) ?? "")
+              }
+            />
           )}
           <DropdownMenu.Root open={copyMenuOpen} onOpenChange={setCopyMenuOpen}>
             <Tooltip

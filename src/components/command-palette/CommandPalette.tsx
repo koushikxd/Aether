@@ -10,6 +10,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useNotes } from "../../context/NotesContext";
+import { useTabs } from "../../context/TabsContext";
 import { useTheme } from "../../context/ThemeContext";
 import { useGit } from "../../context/GitContext";
 import * as notesService from "../../services/notes";
@@ -118,6 +119,8 @@ interface CommandPaletteProps {
   open: boolean;
   /** Sub-view to show when the palette opens; root when unset. */
   initialView?: SubView;
+  /** Picked notes open in a new tab, and Esc closes the palette (Cmd+T). */
+  newTab?: boolean;
   navigation: NoteNavigation;
   onClose: () => void;
   /** Runs when a command opens or creates a note, so App can leave Settings. */
@@ -133,6 +136,7 @@ interface CommandPaletteProps {
 export function CommandPalette({
   open,
   initialView,
+  newTab = false,
   navigation,
   onClose,
   onOpenNote,
@@ -155,6 +159,7 @@ export function CommandPalette({
     notesFolder,
     createNoteInFolder,
   } = useNotes();
+  const { openInNewTab } = useTabs();
   const { recentNotes, parentPageId, goBack, goForward } = navigation;
   // Cmd+Shift+O opens Recent Notes on the previous note, so Enter switches back
   const startIndex =
@@ -205,12 +210,13 @@ export function CommandPalette({
   }, []);
 
   const openNote = useCallback(
-    (id: string) => {
-      void selectNote(id);
+    (id: string, inNewTab = newTab) => {
+      if (inNewTab) openInNewTab(id);
+      else void selectNote(id);
       onOpenNote();
       onClose();
     },
-    [selectNote, onOpenNote, onClose],
+    [newTab, openInNewTab, selectNote, onOpenNote, onClose],
   );
 
   // Clear AI providers whenever the palette closes or no note is selected
@@ -414,7 +420,7 @@ export function CommandPalette({
             try {
               const newNote = await duplicateNote(currentNote.id);
               await refreshNotes();
-              void selectNote(newNote.id);
+              openInNewTab(newNote.id);
               onOpenNote();
               onClose();
             } catch (error) {
@@ -697,7 +703,7 @@ export function CommandPalette({
     commit,
     sync,
     isSyncing,
-    selectNote,
+    openInNewTab,
     refreshNotes,
     settings,
     pinNote,
@@ -760,13 +766,13 @@ export function CommandPalette({
   const rowCount = visibleCommands.length + visibleNotes.length;
 
   const runRow = useCallback(
-    (index: number) => {
+    (index: number, inNewTab?: boolean) => {
       if (index < visibleCommands.length) {
         visibleCommands[index].action();
         return;
       }
       const note = visibleNotes[index - visibleCommands.length];
-      if (note) openNote(note.id);
+      if (note) openNote(note.id, inNewTab);
     },
     [visibleCommands, visibleNotes, openNote],
   );
@@ -831,12 +837,13 @@ export function CommandPalette({
         case "Enter":
           e.preventDefault();
           e.stopPropagation();
-          runRow(selectedIndex);
+          // Cmd+Enter opens a note in a new tab
+          runRow(selectedIndex, e.metaKey || e.ctrlKey || undefined);
           break;
         case "Escape":
           e.preventDefault();
           e.stopPropagation();
-          if (view === "root") onClose();
+          if (view === "root" || newTab) onClose();
           else openView("root");
           break;
         case "Backspace":
@@ -848,7 +855,7 @@ export function CommandPalette({
           break;
       }
     },
-    [view, query, rowCount, selectedIndex, runRow, onClose, openView],
+    [view, query, rowCount, selectedIndex, runRow, onClose, openView, newTab],
   );
 
   if (!open) return null;
@@ -888,9 +895,11 @@ export function CommandPalette({
             placeholder={
               view === "root"
                 ? "Search notes or type a command..."
-                : view === "search"
-                  ? "Search note contents..."
-                  : "Type to filter..."
+                : newTab
+                  ? "Open a note in a new tab..."
+                  : view === "search"
+                    ? "Search note contents..."
+                    : "Type to filter..."
             }
             autoComplete="off"
             autoCorrect="off"

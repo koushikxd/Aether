@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { NoteMetadata, FolderNode } from "../types/note";
 
@@ -148,26 +148,30 @@ function plural(count: number, noun: string): string {
 }
 
 /**
- * Confirmation text for deleting note `id`, which takes everything in its
- * sub-page folder along. Pass null while no dialog is open, so each opening
- * counts again. `ready` stays false until the count arrives, and after it
- * fails, so the text never understates what goes.
+ * What deleting each of `ids` takes along, summed. Pass null while no dialog
+ * is open, so each opening counts again, and keep `ids` stable between
+ * renders. Stays null until every count arrives, and after one fails, so a
+ * dialog never understates what goes.
  */
-export function useDeleteNoteWarning(id: string | null): {
-  text: string;
-  ready: boolean;
-} {
+function useSubPageCounts(ids: readonly string[] | null): SubPageCounts | null {
   const [counted, setCounted] = useState<{
-    id: string;
+    ids: readonly string[];
     counts: SubPageCounts;
   } | null>(null);
 
   useEffect(() => {
-    if (!id) return undefined;
+    if (!ids) return undefined;
     let current = true;
-    invoke<SubPageCounts>("sub_page_counts", { id })
-      .then((counts) => {
-        if (current) setCounted({ id, counts });
+    Promise.all(
+      ids.map((id) => invoke<SubPageCounts>("sub_page_counts", { id })),
+    )
+      .then((all) => {
+        const counts = { subPages: 0, otherFiles: 0 };
+        for (const c of all) {
+          counts.subPages += c.subPages;
+          counts.otherFiles += c.otherFiles;
+        }
+        if (current) setCounted({ ids, counts });
       })
       .catch((error: unknown) => {
         console.error("Failed to count sub-pages:", error);
@@ -176,9 +180,22 @@ export function useDeleteNoteWarning(id: string | null): {
       current = false;
       setCounted(null);
     };
-  }, [id]);
+  }, [ids]);
 
-  const counts = counted?.id === id ? counted.counts : null;
+  return counted?.ids === ids ? counted.counts : null;
+}
+
+/**
+ * Confirmation text for deleting note `id`, which takes everything in its
+ * sub-page folder along. Pass null while no dialog is open. `ready` stays
+ * false until the count arrives.
+ */
+export function useDeleteNoteWarning(id: string | null): {
+  text: string;
+  ready: boolean;
+} {
+  const ids = useMemo(() => (id ? [id] : null), [id]);
+  const counts = useSubPageCounts(ids);
   const parts: string[] = [];
   if (counts?.subPages) parts.push(plural(counts.subPages, "sub-page"));
   if (counts?.otherFiles) parts.push(plural(counts.otherFiles, "other file"));
@@ -187,4 +204,35 @@ export function useDeleteNoteWarning(id: string | null): {
       ? "This will permanently delete the note and all its content. This action cannot be undone."
       : `This will permanently delete the note. This also deletes ${parts.join(" and ")}. This action cannot be undone.`;
   return { text, ready: counts !== null };
+}
+
+/**
+ * Confirmation for deleting the pages `ids` (none inside another, see
+ * `outermostIds`) with their sub-pages. Same contract as useSubPageCounts.
+ */
+export function useDeleteNotesWarning(ids: readonly string[] | null): {
+  title: string;
+  text: string;
+  ready: boolean;
+} {
+  const counts = useSubPageCounts(ids);
+  const subPages = counts?.subPages ?? 0;
+  const pages = (ids?.length ?? 0) + subPages;
+  let detail = "";
+  if (subPages === 1) detail += ", 1 of them a sub-page";
+  else if (subPages > 1) detail += `, ${subPages} of them sub-pages`;
+  if (counts?.otherFiles) {
+    detail += `, and ${plural(counts.otherFiles, "other file")}`;
+  }
+  return {
+    title: `Delete ${plural(pages, "page")}?`,
+    text: `This will permanently delete ${plural(pages, "page")}${detail}. This action cannot be undone.`,
+    ready: counts !== null,
+  };
+}
+
+/** `ids` without those inside another of them: deleting a page takes its sub-pages. */
+export function outermostIds(ids: Iterable<string>): string[] {
+  const all = [...ids];
+  return all.filter((id) => !all.some((other) => id.startsWith(`${other}/`)));
 }

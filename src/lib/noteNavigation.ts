@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNotes } from "../context/NotesContext";
+import { useTabs } from "../context/TabsContext";
 import type { NoteMetadata } from "../types/note";
 
 const RECENT_LIMIT = 20;
@@ -9,9 +10,9 @@ export interface NoteNavigation {
   recentNotes: NoteMetadata[];
   /** The open note's page, when it is a sub-page. */
   parentPageId: string | null;
-  /** Unset when there is nothing to go back to. */
+  /** The active tab's back; unset when there is nothing to go back to. */
   goBack?: () => void;
-  /** Unset when there is nothing to go forward to. */
+  /** The active tab's forward; unset when there is nothing to go forward to. */
   goForward?: () => void;
 }
 
@@ -27,37 +28,22 @@ function loadRecentIds(key: string | null): string[] {
   }
 }
 
-/** Index of the first entry from `start`, stepping by `step`, that passes `exists`; -1 if none. */
-function nearest(
-  ids: string[],
-  start: number,
-  step: 1 | -1,
-  exists: (id: string) => boolean,
-): number {
-  for (let i = start; i >= 0 && i < ids.length; i += step) {
-    if (exists(ids[i])) return i;
-  }
-  return -1;
-}
-
 /**
- * Recent notes and session back/forward history, both fed by the selected
- * note. Call once, in App, and pass the result down.
+ * Recent notes, fed by the selected note, and the active tab's back/forward.
+ * Call once, in App, and pass the result down.
  */
 export function useNoteNavigation(): NoteNavigation {
-  const { notes, notesFolder, selectedNoteId, selectNote } = useNotes();
+  const { notes, notesFolder, selectedNoteId } = useNotes();
+  const { goBack, goForward } = useTabs();
   const storageKey = notesFolder && `aether:recentNotes:${notesFolder}`;
   const [recentIds, setRecentIds] = useState(() => loadRecentIds(storageKey));
-  const [history, setHistory] = useState({ ids: [] as string[], index: -1 });
 
   const [prevKey, setPrevKey] = useState(storageKey);
   if (storageKey !== prevKey) {
     setPrevKey(storageKey);
     setRecentIds(loadRecentIds(storageKey));
-    setHistory({ ids: [], index: -1 });
   }
 
-  // Back and forward set the history index before selecting, so they don't push
   const [prevSelectedId, setPrevSelectedId] = useState(selectedNoteId);
   if (selectedNoteId !== prevSelectedId) {
     setPrevSelectedId(selectedNoteId);
@@ -68,12 +54,6 @@ export function useNoteNavigation(): NoteNavigation {
           RECENT_LIMIT,
         ),
       );
-      if (history.ids[history.index] !== selectedNoteId) {
-        setHistory({
-          ids: [...history.ids.slice(0, history.index + 1), selectedNoteId],
-          index: history.index + 1,
-        });
-      }
     }
   }
 
@@ -97,26 +77,13 @@ export function useNoteNavigation(): NoteNavigation {
     : null;
   const parentPageId = parentId && notesById.has(parentId) ? parentId : null;
 
-  // Entries for deleted or renamed notes are skipped
-  const exists = (id: string) => notesById.has(id);
-  const backIndex = nearest(history.ids, history.index - 1, -1, exists);
-  const forwardIndex = nearest(history.ids, history.index + 1, 1, exists);
-
-  const goTo = useCallback(
-    (index: number) => {
-      setHistory((h) => ({ ...h, index }));
-      void selectNote(history.ids[index]);
-    },
-    [history.ids, selectNote],
-  );
-
   return useMemo(
     () => ({
       recentNotes,
       parentPageId,
-      goBack: backIndex >= 0 ? () => goTo(backIndex) : undefined,
-      goForward: forwardIndex >= 0 ? () => goTo(forwardIndex) : undefined,
+      goBack,
+      goForward,
     }),
-    [recentNotes, parentPageId, backIndex, forwardIndex, goTo],
+    [recentNotes, parentPageId, goBack, goForward],
   );
 }

@@ -1768,3 +1768,31 @@ fn rename_and_move_timings_on_2000_notes() {
         "{found:?}"
     );
 }
+
+#[test]
+fn get_note_info_reports_the_file_birth_time_when_the_platform_has_one() {
+    let notes = TestNotes::new();
+    notes.write("Projects/Plan.md", "# Plan\n");
+
+    let info = run(crate::get_note_info(
+        "Projects/Plan".to_string(),
+        notes.state(),
+    ))
+    .expect("get_note_info");
+
+    let expected = std::fs::metadata(notes.root().join("Projects/Plan.md"))
+        .and_then(|m| m.created())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    assert_eq!(info.created, expected);
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(info.created.is_some());
+    }
+    assert!(run(crate::get_note_info("Missing".to_string(), notes.state())).is_err());
+    assert!(run(crate::get_note_info(
+        "../Outside".to_string(),
+        notes.state()
+    ))
+    .is_err());
+}

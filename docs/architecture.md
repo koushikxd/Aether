@@ -36,14 +36,15 @@ tests/e2e/          Playwright specs plus the fake backend
 
 ## Frontend
 
-- Provider order in `App.tsx`: `ThemeProvider` > `TooltipProvider` > `NotesProvider` > `GitProvider` > `VaultProvider`. Preview windows (`?mode=preview&file=...`) render `PreviewApp` without the notes providers.
+- Provider order in `App.tsx`: `ThemeProvider` > `TooltipProvider` > `NotesProvider` > `GitProvider` > `VaultProvider` > `TabsProvider`. Preview windows (`?mode=preview&file=...`) render `PreviewApp` without the notes providers.
 - `NotesContext` splits data and actions into two contexts (`useNotesData`, `useNotesActions`, or `useNotes` for both), so action consumers do not re-render on data changes.
 - `GitContext` owns git status, commit, pull, sync, push, and the merge editor. It refreshes status 1000 ms after a `file-change` event and fetches every 60 s when a remote exists.
 - `VaultContext` holds the private pages status (`privateIds`, `privateRoots`), the key dialogs, and `makePrivate` / `makePublic`. It refetches status when the notes list or git status changes.
+- `TabsContext` holds the open tabs and each tab's history, and keeps the active tab and `NotesContext`'s selected note in step. NotesContext tells it about created, moved, and deleted notes through `src/lib/noteEvents.ts`. See [tabs.md](tabs.md).
 - `ThemeContext` holds theme, fonts, page width, text direction, and zoom, persisted through the per-folder settings.
 - The editor (`components/editor/Editor.tsx`) saves 500 ms after the last edit (300 ms in source mode) through `save_note`.
 - The command menu is `components/command-palette/CommandPalette.tsx`. The shortcut reference is `src/lib/shortcuts.ts`. Global key handlers are in `App.tsx`, editor ones in `Editor.tsx`.
-- Recent notes and collapsed folders are in `localStorage`.
+- Recent notes, open tabs (`aether:tabs:<folder>`), and collapsed folders are in `localStorage`. Tab state never goes in `.aether/settings.json`, which is committed.
 
 ## Data on disk
 

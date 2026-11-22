@@ -17,7 +17,8 @@ import { cleanTitle } from "../../lib/utils";
 import { useDeleteNoteWarning } from "../../lib/folderTree";
 import * as notesService from "../../services/notes";
 import { FolderTreeView } from "./FolderTreeView";
-import { PinIcon, CopyIcon, TrashIcon } from "../icons";
+import { PinIcon, CopyIcon, TrashIcon, CheckSquareIcon } from "../icons";
+import { useNoteRowClick, type SetNoteIds } from "./useNoteRowClick";
 import { useVault } from "../../context/VaultContext";
 import { PrivacyMenuItem } from "../vault/PrivacyMenuItem";
 import type { Settings } from "../../types/note";
@@ -71,7 +72,9 @@ interface NoteItemProps {
   isSelected: boolean;
   isPinned: boolean;
   isPrivate: boolean;
-  onSelect: (id: string) => void;
+  /** Set only in selection mode: whether the row is selected. */
+  isMultiSelected?: boolean;
+  onSelect: (id: string, event: React.MouseEvent) => void;
   depth?: number;
   showFolderPrefix?: boolean;
 }
@@ -84,12 +87,16 @@ export const NoteItem = memo(function NoteItem({
   isSelected,
   isPinned,
   isPrivate,
+  isMultiSelected,
   onSelect,
   depth,
   showFolderPrefix = true,
 }: NoteItemProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const handleClick = useCallback(() => onSelect(id), [onSelect, id]);
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => onSelect(id, e),
+    [onSelect, id],
+  );
 
   useEffect(() => {
     if (isSelected) {
@@ -116,7 +123,8 @@ export const NoteItem = memo(function NoteItem({
         title={cleanTitle(title)}
         subtitle={displayPreview}
         meta={formatDate(modified)}
-        isSelected={isSelected}
+        isSelected={isMultiSelected ?? isSelected}
+        pressed={isMultiSelected}
         isPinned={isPinned}
         isPrivate={isPrivate}
         onClick={handleClick}
@@ -134,7 +142,9 @@ interface NoteItemWithMenuProps {
   isSelected: boolean;
   isPinned: boolean;
   isPrivate: boolean;
-  onSelect: (id: string) => void;
+  isMultiSelected?: boolean;
+  onSelect: (id: string, event: React.MouseEvent) => void;
+  onSelectMultiple: (id: string) => void;
   onPin: (id: string) => Promise<void>;
   onUnpin: (id: string) => Promise<void>;
   onDuplicate: (id: string) => void;
@@ -150,7 +160,9 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
   isSelected,
   isPinned,
   isPrivate,
+  isMultiSelected,
   onSelect,
+  onSelectMultiple,
   onPin,
   onUnpin,
   onDuplicate,
@@ -190,6 +202,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
             isSelected={isSelected}
             isPinned={isPinned}
             isPrivate={isPrivate}
+            isMultiSelected={isMultiSelected}
             onSelect={onSelect}
           />
         </div>
@@ -213,6 +226,13 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
           >
             <CopyIcon className="w-4 h-4 stroke-[1.6]" />
             Copy Filepath
+          </ContextMenu.Item>
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onSelectMultiple(id)}
+          >
+            <CheckSquareIcon className="w-4 h-4 stroke-[1.6]" />
+            Select Multiple
           </ContextMenu.Item>
           <ContextMenu.Separator className={menuSeparatorClass} />
           <PrivacyMenuItem
@@ -239,21 +259,16 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
 
 interface NoteListProps {
   multiSelectedNoteIds: Set<string>;
-  setMultiSelectedNoteIds: React.Dispatch<React.SetStateAction<Set<string>>>;
-  lastClickedNoteId: string | null;
-  setLastClickedNoteId: React.Dispatch<React.SetStateAction<string | null>>;
+  setMultiSelectedNoteIds: SetNoteIds;
 }
 
 export function NoteList({
   multiSelectedNoteIds,
   setMultiSelectedNoteIds,
-  lastClickedNoteId,
-  setLastClickedNoteId,
 }: NoteListProps) {
   const {
     notes,
     selectedNoteId,
-    selectNote,
     deleteNote,
     duplicateNote,
     pinNote,
@@ -303,6 +318,18 @@ export function NoteList({
     setNoteToDelete(noteId);
     setDeleteDialogOpen(true);
   }, []);
+
+  const selecting = multiSelectedNoteIds.size > 0;
+  const noteIds = useMemo(() => notes.map((n) => n.id), [notes]);
+  const handleNoteClick = useNoteRowClick(
+    noteIds,
+    selecting,
+    setMultiSelectedNoteIds,
+  );
+  const selectOnly = useCallback(
+    (id: string) => setMultiSelectedNoteIds(new Set([id])),
+    [setMultiSelectedNoteIds],
+  );
 
   const refreshSettings = useCallback(() => {
     void notesService.getSettings().then(setSettings);
@@ -359,8 +386,7 @@ export function NoteList({
           settings={settings}
           multiSelectedNoteIds={multiSelectedNoteIds}
           setMultiSelectedNoteIds={setMultiSelectedNoteIds}
-          lastClickedNoteId={lastClickedNoteId}
-          setLastClickedNoteId={setLastClickedNoteId}
+          onSelectMultiple={selectOnly}
         />
 
         {/* Delete confirmation dialog */}
@@ -406,7 +432,11 @@ export function NoteList({
             isSelected={selectedNoteId === item.id}
             isPinned={pinnedIds.has(item.id)}
             isPrivate={privateIds.has(item.id)}
-            onSelect={selectNote}
+            isMultiSelected={
+              selecting ? multiSelectedNoteIds.has(item.id) : undefined
+            }
+            onSelect={handleNoteClick}
+            onSelectMultiple={selectOnly}
             onPin={pinNote}
             onUnpin={unpinNote}
             onDuplicate={duplicateNote}

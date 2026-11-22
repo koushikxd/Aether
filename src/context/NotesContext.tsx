@@ -14,6 +14,15 @@ import { toast } from "sonner";
 import type { Note, NoteMetadata } from "../types/note";
 import * as notesService from "../services/notes";
 import { errorMessage } from "../services/export";
+import { emitNoteEvent } from "../lib/noteEvents";
+
+/** Maps `from` and everything under `from/` (a page's sub-pages) to `to`. */
+const movedFrom = (from: string, to: string) => (id: string) =>
+  id === from || id.startsWith(`${from}/`) ? to + id.slice(from.length) : id;
+
+/** Maps only what is under the `from/` folder to the `to/` folder. */
+const movedUnder = (from: string, to: string) => (id: string) =>
+  id.startsWith(`${from}/`) ? to + id.slice(from.length) : id;
 
 // Separate contexts to prevent unnecessary re-renders
 // Data context: changes frequently, only subscribed by components that need the data
@@ -167,6 +176,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       // Mark as recently saved to ignore file-change events from our own creation
       recentlySavedRef.current.add(note.id);
       await refreshNotes();
+      emitNoteEvent({ type: "created", id: note.id });
       setCurrentNote(note);
       setSelectedNoteId(note.id);
       setTimeout(() => {
@@ -235,6 +245,10 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         // The backend moved its pins, and its sub-pages' pins, along.
         if (updated.id !== savingNoteId) {
           recentlySavedRef.current.add(updated.id);
+          emitNoteEvent({
+            type: "moved",
+            newIdOf: movedFrom(savingNoteId, updated.id),
+          });
         }
 
         // Clear external changes flag - if it was set by our own save, we want to ignore it
@@ -301,6 +315,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
           await notesService.updateSettings(updatedSettings);
         }
 
+        emitNoteEvent({ type: "deleted", isDeleted });
         // Only clear selection if we're deleting the currently selected note
         setSelectedNoteId((prevId) => {
           if (prevId && isDeleted(prevId)) {
@@ -325,6 +340,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         // Mark as recently saved to ignore file-change events from our own creation
         recentlySavedRef.current.add(newNote.id);
         await refreshNotes();
+        emitNoteEvent({ type: "created", id: newNote.id });
         setCurrentNote(newNote);
         setSelectedNoteId(newNote.id);
         setTimeout(() => {
@@ -387,6 +403,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         pendingNewNoteIdRef.current = note.id;
         recentlySavedRef.current.add(note.id);
         await refreshNotes();
+        emitNoteEvent({ type: "created", id: note.id });
         setCurrentNote(note);
         setSelectedNoteId(note.id);
         setTimeout(() => {
@@ -418,6 +435,10 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     async (path: string) => {
       try {
         await notesService.deleteFolder(path);
+        emitNoteEvent({
+          type: "deleted",
+          isDeleted: (id) => id.startsWith(`${path}/`),
+        });
         // If the selected note was inside the deleted folder, clear selection
         setSelectedNoteId((prevId) => {
           if (prevId && prevId.startsWith(path + "/")) {
@@ -456,14 +477,9 @@ export function NotesProvider({ children }: { children: ReactNode }) {
           lastSlash >= 0
             ? `${oldPath.substring(0, lastSlash)}/${newName}`
             : newName;
-        const oldPrefix = oldPath + "/";
-        const newPrefix = newPath + "/";
-
-        await followSelectedNote((selected) =>
-          selected.startsWith(oldPrefix)
-            ? newPrefix + selected.substring(oldPrefix.length)
-            : selected,
-        );
+        const newIdOf = movedUnder(oldPath, newPath);
+        emitNoteEvent({ type: "moved", newIdOf });
+        await followSelectedNote(newIdOf);
 
         await refreshNotes();
       } catch (err) {
@@ -481,11 +497,9 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         await flushPendingSaveRef.current?.();
         const newId = await notesService.moveNote(id, targetFolder);
         // A page's sub-pages move with it
-        await followSelectedNote((selected) =>
-          selected === id || selected.startsWith(`${id}/`)
-            ? newId + selected.slice(id.length)
-            : selected,
-        );
+        const newIdOf = movedFrom(id, newId);
+        emitNoteEvent({ type: "moved", newIdOf });
+        await followSelectedNote(newIdOf);
         await refreshNotes();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to move note");
@@ -507,14 +521,9 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         const newPath = targetParent
           ? `${targetParent}/${folderName}`
           : folderName;
-        const oldPrefix = path + "/";
-        const newPrefix = newPath + "/";
-
-        await followSelectedNote((selected) =>
-          selected.startsWith(oldPrefix)
-            ? newPrefix + selected.substring(oldPrefix.length)
-            : selected,
-        );
+        const newIdOf = movedUnder(path, newPath);
+        emitNoteEvent({ type: "moved", newIdOf });
+        await followSelectedNote(newIdOf);
 
         await refreshNotes();
       } catch (err) {

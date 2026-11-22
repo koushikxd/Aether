@@ -31,6 +31,8 @@ export interface FakeBackend {
   hold: (cmd: string) => void;
   release: (cmd: string) => void;
   emit: (event: string, payload: unknown) => Promise<void>;
+  /** Birth time `get_note_info` reports for every note (null = the platform has none). */
+  noteCreated: number | null;
 }
 
 declare global {
@@ -555,6 +557,8 @@ const fake: FakeBackend = {
     waiting.forEach((run) => run());
   },
   emit,
+  // 2026-03-15 12:00 UTC: the same calendar day in every time zone.
+  noteCreated: 1773576000,
 };
 
 const handlers: Record<string, Handler> = {
@@ -577,6 +581,11 @@ const handlers: Record<string, Handler> = {
     const id = str(args, "id");
     if (!(`${id}.md` in files)) return Promise.reject("Note not found");
     return note(id);
+  },
+  get_note_info: (args) => {
+    const id = str(args, "id");
+    if (!(`${id}.md` in files)) return Promise.reject("Note not found");
+    return { created: fake.noteCreated };
   },
   save_note: saveNote,
   search_notes: searchNotes,
@@ -658,6 +667,8 @@ const handlers: Record<string, Handler> = {
       : Promise.reject(`Could not read ${path}`);
   },
   "plugin:updater|check": () => null,
+  // Cmd+W on the last tab; the call log is the record.
+  "plugin:window|close": () => null,
   ...vaultHandlers({ files, writeFile }),
   ...mergeHandlers({ files, writeFile }),
 };
