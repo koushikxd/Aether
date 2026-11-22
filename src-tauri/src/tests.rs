@@ -821,6 +821,7 @@ fn export_folder(notes: &TestNotes, folder: &str) -> (tempfile::TempDir, std::pa
     run(crate::export_folder_zip(
         folder.to_string(),
         dest.to_string_lossy().into_owned(),
+        false,
         notes.state(),
     ))
     .expect("export_folder_zip");

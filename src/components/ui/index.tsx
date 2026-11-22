@@ -2,7 +2,7 @@ import * as React from "react";
 import { type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "./Tooltip";
-import { ChevronRightIcon, PinIcon } from "../icons";
+import { ChevronRightIcon, LockIcon, PinIcon } from "../icons";
 
 // Re-export components
 export {
@@ -135,6 +135,7 @@ interface ListItemProps {
   meta?: string;
   isSelected?: boolean;
   isPinned?: boolean;
+  isPrivate?: boolean;
   onClick?: () => void;
   /** Optional status icon to display next to meta */
 }
@@ -145,6 +146,7 @@ export function ListItem({
   meta,
   isSelected = false,
   isPinned = false,
+  isPrivate = false,
   onClick,
   onContextMenu,
 }: ListItemProps & { onContextMenu?: (e: React.MouseEvent) => void }) {
@@ -180,6 +182,11 @@ export function ListItem({
             {title}
           </span>
         </div>
+        {isPrivate && (
+          <span data-private-icon className="shrink-0">
+            <LockIcon className="w-3.5 h-3.5 stroke-[1.8] text-text-muted" />
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-1.5 shrink-0">
         {meta && (

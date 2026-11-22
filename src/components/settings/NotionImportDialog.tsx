@@ -17,11 +17,13 @@ import {
   Button,
   Select,
 } from "../ui";
+import { PrivatePagePicker } from "../vault/PrivatePagePicker";
 
 type Status =
   | { step: "ready"; error?: string }
   | { step: "importing"; current: number; total: number }
-  | { step: "done"; summary: NotionImportSummary };
+  | { step: "done"; summary: NotionImportSummary }
+  | { step: "private"; summary: NotionImportSummary };
 
 function count(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
@@ -82,15 +84,27 @@ export function NotionImportDialog({
     >
       <AlertDialogContent className="max-w-lg">
         <AlertDialogHeader>
-          <AlertDialogTitle>Import from Notion</AlertDialogTitle>
+          <AlertDialogTitle>
+            {status.step === "private"
+              ? "Select private pages"
+              : "Import from Notion"}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            {status.step === "done"
-              ? summaryText(status.summary)
-              : "Notes, images and files from a Notion HTML export."}
+            {status.step === "private"
+              ? "Checked pages and their sub-pages are encrypted before they sync."
+              : status.step === "done"
+                ? summaryText(status.summary)
+                : "Notes, images and files from a Notion HTML export."}
           </AlertDialogDescription>
         </AlertDialogHeader>
 
-        {status.step === "done" ? (
+        {status.step === "private" ? (
+          <PrivatePagePicker
+            folder={status.summary.folder}
+            onBack={() => setStatus({ ...status, step: "done" })}
+            onDone={onClose}
+          />
+        ) : status.step === "done" ? (
           status.summary.skipped.length === 0 ? (
             <p className="text-sm text-text-muted">Nothing was skipped.</p>
           ) : (
@@ -155,18 +169,30 @@ export function NotionImportDialog({
           </div>
         )}
 
-        <AlertDialogFooter>
-          {status.step === "done" ? (
-            <AlertDialogAction>Done</AlertDialogAction>
-          ) : (
-            <>
-              <AlertDialogCancel disabled={importing}>Cancel</AlertDialogCancel>
-              <Button onClick={handleImport} disabled={importing}>
-                {importing ? "Importing..." : "Import"}
-              </Button>
-            </>
-          )}
-        </AlertDialogFooter>
+        {status.step !== "private" && (
+          <AlertDialogFooter>
+            {status.step === "done" ? (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => setStatus({ ...status, step: "private" })}
+                >
+                  Select private pages
+                </Button>
+                <AlertDialogAction>Done</AlertDialogAction>
+              </>
+            ) : (
+              <>
+                <AlertDialogCancel disabled={importing}>
+                  Cancel
+                </AlertDialogCancel>
+                <Button onClick={handleImport} disabled={importing}>
+                  {importing ? "Importing..." : "Import"}
+                </Button>
+              </>
+            )}
+          </AlertDialogFooter>
+        )}
       </AlertDialogContent>
     </AlertDialog>
   );

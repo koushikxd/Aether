@@ -40,9 +40,16 @@ export function exportNoteZip(id: string, markdown: string, title: string) {
   return exportZip(title, "export_note_zip", { id, markdown });
 }
 
-/** A folder of notes (`""` for the whole notes folder) with its assets, in one zip. */
-export function exportFolderZip(folder: string, name: string) {
-  return exportZip(name, "export_folder_zip", { folder });
+/**
+ * A folder of notes (`""` for the whole notes folder) with its assets, in one
+ * zip. Private pages are left out unless `includePrivate`.
+ */
+export function exportFolderZip(
+  folder: string,
+  name: string,
+  includePrivate: boolean,
+) {
+  return exportZip(name, "export_folder_zip", { folder, includePrivate });
 }
 
 /**

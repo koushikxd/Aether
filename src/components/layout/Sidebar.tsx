@@ -17,10 +17,17 @@ import {
   type DragEndEvent,
 } from "@dnd-kit/core";
 import { useNotes } from "../../context/NotesContext";
+import { useVault } from "../../context/VaultContext";
 import { NoteList } from "../notes/NoteList";
 import { Footer } from "./Footer";
-import { IconButton } from "../ui";
-import { PlusIcon, AddNoteIcon, FolderPlusIcon, NoteIcon } from "../icons";
+import { Button, IconButton } from "../ui";
+import {
+  PlusIcon,
+  AddNoteIcon,
+  FolderPlusIcon,
+  NoteIcon,
+  LockIcon,
+} from "../icons";
 import { mod, isMac, isWindows } from "../../lib/platform";
 import * as notesService from "../../services/notes";
 import { FolderNameDialog } from "../notes/FolderNameDialog";
@@ -38,6 +45,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     moveNote,
     moveFolder,
   } = useNotes();
+  const { status: vault, enterKey } = useVault();
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [folderDialogParent, setFolderDialogParent] = useState("");
@@ -286,6 +294,15 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
             )}
           </div>
         </div>
+        {vault?.hasVault && !vault.unlocked && vault.lockedCount > 0 && (
+          <output className="flex items-center gap-2 mx-1.5 mt-1.5 pl-2.5 pr-1.5 py-1.5 rounded-md bg-bg-muted text-sm text-text shrink-0">
+            <LockIcon className="w-3.5 h-3.5 stroke-[1.8] text-text-muted shrink-0" />
+            <span className="flex-1 truncate">Private pages locked</span>
+            <Button size="xs" variant="outline" onClick={enterKey}>
+              Enter key
+            </Button>
+          </output>
+        )}
         {/* Scrollable notes area */}
         <div className="flex-1 overflow-y-auto">
           {/* Note list */}

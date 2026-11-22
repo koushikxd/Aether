@@ -4,6 +4,7 @@ import { NotesProvider, useNotes } from "./context/NotesContext";
 import { ThemeProvider, useTheme } from "./context/ThemeContext";
 import { listen } from "@tauri-apps/api/event";
 import { GitProvider } from "./context/GitContext";
+import { VaultProvider } from "./context/VaultContext";
 import { TooltipProvider, Toaster } from "./components/ui";
 import { Sidebar } from "./components/layout/Sidebar";
 import { SidebarResizeHandle } from "./components/layout/SidebarResizeHandle";
@@ -755,7 +756,9 @@ function App() {
       <TooltipProvider>
         <NotesProvider>
           <GitProvider>
-            <AppContent />
+            <VaultProvider>
+              <AppContent />
+            </VaultProvider>
           </GitProvider>
         </NotesProvider>
       </TooltipProvider>

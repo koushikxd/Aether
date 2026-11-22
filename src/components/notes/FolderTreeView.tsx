@@ -35,7 +35,11 @@ import {
   CopyIcon,
   ArrowUpIcon,
   DownloadIcon,
+  LockIcon,
 } from "../icons";
+import { useVault } from "../../context/VaultContext";
+import { PrivacyMenuItem } from "../vault/PrivacyMenuItem";
+import { ExportZipDialog } from "../vault/ExportZipDialog";
 import * as notesService from "../../services/notes";
 import { exportFolderZip } from "../../services/export";
 import type { FolderNode, NoteMetadata, Settings } from "../../types/note";
@@ -75,6 +79,7 @@ interface FileItemProps {
   isSelected: boolean;
   isMultiSelected: boolean;
   isPinned: boolean;
+  isPrivate: boolean;
   onNoteClick: (id: string, event: React.MouseEvent) => void;
   onPin: (id: string) => Promise<void>;
   onUnpin: (id: string) => Promise<void>;
@@ -94,6 +99,7 @@ const FileItem = memo(function FileItem({
   isSelected,
   isMultiSelected,
   isPinned,
+  isPrivate,
   onNoteClick,
   onPin,
   onUnpin,
@@ -217,6 +223,11 @@ const FileItem = memo(function FileItem({
           <span className="text-sm text-text truncate">
             {cleanTitle(note.title)}
           </span>
+          {isPrivate && (
+            <span data-private-icon className="ml-auto shrink-0">
+              <LockIcon className="w-3.5 h-3.5 stroke-[1.8] text-text-muted" />
+            </span>
+          )}
         </div>
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
@@ -251,6 +262,12 @@ const FileItem = memo(function FileItem({
             <CopyIcon className="w-4 h-4 stroke-[1.6]" />
             Copy Filepath
           </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <PrivacyMenuItem
+            id={note.id}
+            title={cleanTitle(note.title)}
+            className={menuItemClass}
+          />
           {noteParentFolder && onMoveToParent && (
             <>
               <ContextMenu.Separator className={menuSeparatorClass} />
@@ -299,12 +316,14 @@ interface TreeProps {
   onToggleCollapse: (path: string) => void;
   selectedNoteId: string | null;
   pinnedIds: Set<string>;
+  privateIds: Set<string>;
   multiSelectedNoteIds: Set<string>;
   onNoteClick: (id: string, event: React.MouseEvent) => void;
   focusedItemKey: string | null;
   onCreateNoteHere: (path: string) => void;
   onNewSubfolder: (parentPath: string) => void;
   onRenameFolder: (path: string, currentName: string) => void;
+  onExportFolder: (folder: FolderNode) => void;
   onDeleteFolder: (path: string) => void;
   onPinNote: (id: string) => Promise<void>;
   onUnpinNote: (id: string) => Promise<void>;
@@ -354,6 +373,7 @@ function NoteItem({
         isSelected={tree.selectedNoteId === note.id}
         isMultiSelected={tree.multiSelectedNoteIds.has(note.id)}
         isPinned={tree.pinnedIds.has(note.id)}
+        isPrivate={tree.privateIds.has(note.id)}
         onNoteClick={tree.onNoteClick}
         onPin={tree.onPinNote}
         onUnpin={tree.onUnpinNote}
@@ -384,6 +404,7 @@ const FolderItemComponent = memo(function FolderItem({
     onCreateNoteHere,
     onNewSubfolder,
     onRenameFolder,
+    onExportFolder,
     onDeleteFolder,
     onMoveFolderToParent,
   } = tree;
@@ -490,7 +511,7 @@ const FolderItemComponent = memo(function FolderItem({
           </ContextMenu.Item>
           <ContextMenu.Item
             className={menuItemClass}
-            onSelect={() => void exportFolderZip(folder.path, folder.name)}
+            onSelect={() => onExportFolder(folder)}
           >
             <DownloadIcon className="w-4 h-4 stroke-[1.6]" />
             Export as Zip
@@ -571,6 +592,7 @@ export function FolderTreeView({
     moveNote,
     moveFolder,
   } = useNotes();
+  const { privateIds } = useVault();
 
   const [collapsedFolders, setCollapsedFolders] =
     useState<Set<string>>(loadCollapsedFolders);
@@ -579,6 +601,7 @@ export function FolderTreeView({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [folderToRename, setFolderToRename] = useState<string | null>(null);
   const [renameDefaultValue, setRenameDefaultValue] = useState("");
+  const [folderToExport, setFolderToExport] = useState<FolderNode | null>(null);
   const [subfolderDialogOpen, setSubfolderDialogOpen] = useState(false);
   const [subfolderParent, setSubfolderParent] = useState("");
   const [noteDeleteDialogOpen, setNoteDeleteDialogOpen] = useState(false);
@@ -658,6 +681,19 @@ export function FolderTreeView({
       setRenameDialogOpen(true);
     },
     [],
+  );
+
+  // Only a folder with private pages has anything to ask about.
+  const handleExportFolder = useCallback(
+    (folder: FolderNode) => {
+      const prefix = `${folder.path}/`;
+      if ([...privateIds].some((id) => id.startsWith(prefix))) {
+        setFolderToExport(folder);
+      } else {
+        void exportFolderZip(folder.path, folder.name, false);
+      }
+    },
+    [privateIds],
   );
 
   const handleDeleteFolder = useCallback((path: string) => {
@@ -929,11 +965,13 @@ export function FolderTreeView({
     selectedNoteId,
     focusedItemKey,
     pinnedIds,
+    privateIds,
     multiSelectedNoteIds,
     onNoteClick: handleNoteClick,
     onCreateNoteHere: createNoteInFolder,
     onNewSubfolder: handleNewSubfolder,
     onRenameFolder: handleRenameFolder,
+    onExportFolder: handleExportFolder,
     onDeleteFolder: handleDeleteFolder,
     onPinNote: pinNote,
     onUnpinNote: unpinNote,
@@ -1011,6 +1049,21 @@ export function FolderTreeView({
         confirmLabel="Rename"
         defaultValue={renameDefaultValue}
       />
+
+      {folderToExport && (
+        <ExportZipDialog
+          title={`Export ${folderToExport.name}`}
+          description="Every note and asset in this folder, in one zip."
+          onExport={(includePrivate) =>
+            void exportFolderZip(
+              folderToExport.path,
+              folderToExport.name,
+              includePrivate,
+            )
+          }
+          onClose={() => setFolderToExport(null)}
+        />
+      )}
 
       {/* New subfolder dialog */}
       <FolderNameDialog

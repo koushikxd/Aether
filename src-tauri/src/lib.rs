@@ -20,12 +20,16 @@ use tokio::io::AsyncWriteExt;
 
 mod export;
 mod git;
+mod merge;
 mod notion_import;
 mod relink;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod tests;
+mod vault;
+#[cfg(test)]
+mod vault_tests;
 
 // Note metadata for list display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +434,7 @@ pub struct AppState {
     pub file_watcher: Mutex<Option<FileWatcherState>>,
     pub search_index: Mutex<Option<SearchIndex>>,
     pub debounce_map: Arc<Mutex<HashMap<PathBuf, Instant>>>,
+    pub key_store: Arc<dyn vault::KeyStore>,
 }
 
 impl Default for AppState {
@@ -441,6 +446,7 @@ impl Default for AppState {
             file_watcher: Mutex::new(None),
             search_index: Mutex::new(None),
             debounce_map: Arc::new(Mutex::new(HashMap::new())),
+            key_store: vault::default_store(),
         }
     }
 }
@@ -861,32 +867,51 @@ fn save_app_config(app: &AppHandle, config: &AppConfig) -> Result<()> {
 fn load_settings(notes_folder: &str) -> Settings {
     let path = get_settings_path(notes_folder);
 
-    if path.exists() {
+    let mut settings: Settings = if path.exists() {
         std::fs::read_to_string(&path)
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
             .unwrap_or_default()
     } else {
         Settings::default()
+    };
+    if let Some(pins) = settings.pinned_note_ids.as_mut() {
+        for id in vault::private_pins(Path::new(notes_folder)) {
+            if !pins.contains(&id) {
+                pins.push(id);
+            }
+        }
     }
+    settings
 }
 
-// Save per-folder settings to disk
+// Save per-folder settings to disk, without the pins of private pages
 fn save_settings(notes_folder: &str, settings: &Settings) -> Result<()> {
     let path = get_settings_path(notes_folder);
-    let content = serde_json::to_string_pretty(settings)?;
+    let mut settings = settings.clone();
+    if let Some(pins) = &settings.pinned_note_ids {
+        let public =
+            vault::keep_private_pins(Path::new(notes_folder), pins).map_err(anyhow::Error::msg)?;
+        settings.pinned_note_ids = Some(public);
+    }
+    let content = serde_json::to_string_pretty(&settings)?;
     std::fs::write(path, content)?;
     Ok(())
 }
 
-/// Rewrites links across the notes folder after `moves`, off the async
-/// runtime, and re-indexes the notes that moved. The file watcher re-indexes
-/// the other notes whose links changed.
+/// Points private-page marks at their new ids after `moves`, rewrites links
+/// across the notes folder, off the async runtime, and re-indexes the notes
+/// that moved. The file watcher re-indexes the other notes whose links changed.
 async fn relink_and_reindex(state: &AppState, notes_root: &Path, moves: Vec<relink::Move>) {
     let root = notes_root.to_path_buf();
     let ignored = ignored_dirs(state);
     let moved = match tauri::async_runtime::spawn_blocking(move || {
-        relink::relink_notes(&root, &moves, &ignored)
+        let moved = relink::relink_notes(&root, &moves, &ignored);
+        // After the relink, so private assets are found through the rewritten links.
+        if let Err(e) = vault::follow_moves(&root, &ignored, &moves) {
+            eprintln!("Failed to update private pages after a move: {e}");
+        }
+        moved
     })
     .await
     {
@@ -1091,6 +1116,10 @@ fn initialize_notes_folder(app: &AppHandle, path_buf: &PathBuf, state: &AppState
     {
         let mut current_settings = state.settings.write().expect("settings write lock");
         *current_settings = settings;
+    }
+
+    if let Err(e) = vault::decrypt(path_buf, &ignored_dirs(state), state.key_store.as_ref()) {
+        eprintln!("Failed to decrypt private pages: {e}");
     }
 
     // Save app config to disk
@@ -1388,6 +1417,16 @@ async fn save_note(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    let (root, ignored) = (folder_path.clone(), ignored_dirs(&state));
+    let (id, markdown) = (final_id.clone(), content.clone());
+    if let Ok(Err(e)) = tauri::async_runtime::spawn_blocking(move || {
+        vault::page_saved(&root, &ignored, &id, &markdown)
+    })
+    .await
+    {
+        eprintln!("Failed to update private pages after a save: {e}");
+    }
+
     // A rename re-indexed the note with the notes that moved along
     if old_id.is_none() {
         let index = state.search_index.lock().expect("search index mutex");
@@ -1432,6 +1471,7 @@ async fn delete_note(id: String, state: State<'_, AppState>) -> Result<(), Strin
             .map_err(|e| e.to_string())?;
     }
     remove_empty_sub_page_dir(&folder_path, parent_folder(&id));
+    vault::prune_marks(&folder_path, &ignored_dirs(&state))?;
 
     // Update search index
     {
@@ -1721,6 +1761,7 @@ async fn delete_folder(path: String, state: State<'_, AppState>) -> Result<(), S
         .await
         .map_err(|e| e.to_string())?;
     remove_empty_sub_page_dir(Path::new(&folder), parent_folder(&path));
+    vault::prune_marks(Path::new(&folder), &ignored_dirs(&state))?;
 
     Ok(())
 }
@@ -2751,9 +2792,15 @@ fn ignored_dirs(state: &AppState) -> Vec<String> {
     get_effective_ignored_dirs(&state.settings.read().expect("settings read lock"))
 }
 
-/// Zips a folder of notes (`""` for the whole notes folder) to `dest`.
+/// Zips a folder of notes (`""` for the whole notes folder) to `dest`,
+/// without private pages unless `include_private`.
 #[tauri::command]
-async fn export_folder_zip(folder: String, dest: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn export_folder_zip(
+    folder: String,
+    dest: String,
+    include_private: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     if !folder.is_empty() {
         validate_folder_path(&folder)?;
     }
@@ -2763,7 +2810,12 @@ async fn export_folder_zip(folder: String, dest: String, state: State<'_, AppSta
     }
     let ignored = ignored_dirs(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        export::export_folder(&root, &folder, &ignored, Path::new(&dest))
+        let private = if include_private {
+            vault::PrivateSet::default()
+        } else {
+            vault::current_private_set(&root, &ignored)?
+        };
+        export::export_folder(&root, &folder, &ignored, &private, Path::new(&dest))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2967,6 +3019,86 @@ async fn open_url_safe(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open URL: {}", e))
 }
 
+/// Runs `f` with the notes folder, ignored folders and key store, off the async runtime.
+async fn with_vault<T: Send + 'static>(
+    state: &AppState,
+    f: impl FnOnce(&Path, &[String], &dyn vault::KeyStore) -> T + Send + 'static,
+) -> Result<T, String> {
+    let root = PathBuf::from(notes_folder(state)?);
+    let ignored = ignored_dirs(state);
+    let store = state.key_store.clone();
+    tauri::async_runtime::spawn_blocking(move || f(&root, &ignored, store.as_ref()))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vault_status(state: State<'_, AppState>) -> Result<vault::VaultStatus, String> {
+    with_vault(&state, vault::status).await?
+}
+
+#[tauri::command]
+async fn vault_generate_key(state: State<'_, AppState>) -> Result<String, String> {
+    with_vault(&state, |root, _, store| vault::generate_key(root, store)).await?
+}
+
+#[tauri::command]
+async fn vault_enter_key(
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<vault::VaultStatus, String> {
+    with_vault(&state, move |root, ignored, store| {
+        vault::enter_key(root, ignored, store, &key)?;
+        vault::status(root, ignored, store)
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn vault_show_key(state: State<'_, AppState>) -> Result<String, String> {
+    with_vault(&state, |root, _, store| vault::show_key(root, store)).await?
+}
+
+#[tauri::command]
+async fn vault_set_private(
+    ids: Vec<String>,
+    is_private: bool,
+    state: State<'_, AppState>,
+) -> Result<vault::VaultStatus, String> {
+    with_vault(&state, move |root, ignored, store| {
+        vault::set_private(root, ignored, store, &ids, is_private)?;
+        vault::status(root, ignored, store)
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn git_conflicts(state: State<'_, AppState>) -> Result<Vec<merge::ConflictFile>, String> {
+    with_vault(&state, |root, _, store| merge::conflicts(root, store)).await?
+}
+
+#[tauri::command]
+async fn git_resolve_conflict(
+    path: String,
+    resolution: merge::ConflictResolution,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    with_vault(&state, move |root, _, store| {
+        merge::resolve(root, store, &path, resolution)
+    })
+    .await?
+}
+
+#[tauri::command]
+async fn git_finish_merge(state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    with_vault(&state, merge::finish).await?
+}
+
+#[tauri::command]
+async fn git_abort_merge(state: State<'_, AppState>) -> Result<git::GitResult, String> {
+    with_vault(&state, merge::abort).await?
+}
+
 // Git commands - run blocking git operations off the main thread
 
 #[tauri::command]
@@ -2983,14 +3115,18 @@ async fn git_get_status(state: State<'_, AppState>) -> Result<git::GitStatus, St
         app_config.notes_folder.clone()
     };
 
+    let ignored = ignored_dirs(&state);
     match folder {
-        Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
-                git::get_status(&PathBuf::from(path))
-            })
-            .await
-            .map_err(|e| e.to_string())
-        }
+        Some(path) => tauri::async_runtime::spawn_blocking(move || {
+            let root = PathBuf::from(path);
+            let mut status = git::get_status(&root);
+            if status.is_repo {
+                status.changed_count += vault::pending_count(&root, &ignored);
+            }
+            status
+        })
+        .await
+        .map_err(|e| e.to_string()),
         None => Ok(git::GitStatus::default()),
     }
 }
@@ -3016,14 +3152,25 @@ async fn git_commit(message: String, state: State<'_, AppState>) -> Result<git::
         app_config.notes_folder.clone()
     };
 
+    let ignored = ignored_dirs(&state);
+    let store = state.key_store.clone();
     match folder {
-        Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
-                git::commit_all(&PathBuf::from(path), &message)
-            })
-            .await
-            .map_err(|e| e.to_string())
-        }
+        Some(path) => tauri::async_runtime::spawn_blocking(move || {
+            let root = PathBuf::from(path);
+            let private = match vault::before_commit(&root, &ignored, store.as_ref()) {
+                Ok(files) => files,
+                Err(error) => {
+                    return git::GitResult {
+                        success: false,
+                        message: None,
+                        error: Some(error),
+                    }
+                }
+            };
+            git::commit_all(&root, &message, || vault::untrack(&root, &private))
+        })
+        .await
+        .map_err(|e| e.to_string()),
         None => Ok(git::GitResult {
             success: false,
             message: None,
@@ -3085,14 +3232,14 @@ async fn git_pull(state: State<'_, AppState>) -> Result<git::GitResult, String> 
         app_config.notes_folder.clone()
     };
 
+    let ignored = ignored_dirs(&state);
+    let store = state.key_store.clone();
     match folder {
-        Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
-                git::pull(&PathBuf::from(path))
-            })
-            .await
-            .map_err(|e| e.to_string())
-        }
+        Some(path) => tauri::async_runtime::spawn_blocking(move || {
+            vault::pull(&PathBuf::from(path), &ignored, store.as_ref())
+        })
+        .await
+        .map_err(|e| e.to_string()),
         None => Ok(git::GitResult {
             success: false,
             message: None,
@@ -4202,8 +4349,16 @@ pub fn run() {
                 Settings::default()
             };
 
-            // Initialize search index if notes folder is set
             let ignored_dirs = get_effective_ignored_dirs(&settings);
+            let key_store: Arc<dyn vault::KeyStore> = Arc::new(vault::OsKeyStore);
+            if let Some(ref folder) = app_config.notes_folder {
+                if let Err(e) = vault::decrypt(Path::new(folder), &ignored_dirs, key_store.as_ref())
+                {
+                    eprintln!("Failed to decrypt private pages: {e}");
+                }
+            }
+
+            // Initialize search index if notes folder is set
             let search_index = if let Some(ref folder) = app_config.notes_folder {
                 if let Ok(index_path) = get_search_index_path(app.handle()) {
                     SearchIndex::new(&index_path).ok().inspect(|idx| {
@@ -4223,6 +4378,7 @@ pub fn run() {
                 file_watcher: Mutex::new(None),
                 search_index: Mutex::new(search_index),
                 debounce_map: Arc::new(Mutex::new(HashMap::new())),
+                key_store,
             };
             app.manage(state);
 
@@ -4334,6 +4490,15 @@ pub fn run() {
             git_set_remote_url,
             git_remove_remote,
             git_push_with_upstream,
+            git_conflicts,
+            git_resolve_conflict,
+            git_finish_merge,
+            git_abort_merge,
+            vault_status,
+            vault_generate_key,
+            vault_enter_key,
+            vault_show_key,
+            vault_set_private,
             ai_check_claude_cli,
             ai_check_codex_cli,
             ai_check_opencode_cli,

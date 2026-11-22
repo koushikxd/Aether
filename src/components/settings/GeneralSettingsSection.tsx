@@ -23,6 +23,9 @@ import {
 } from "../../services/export";
 import { listFolders } from "../../services/notes";
 import { NotionImportDialog } from "./NotionImportDialog";
+import { ExportZipDialog } from "../vault/ExportZipDialog";
+import { PrivatePagesSection } from "./PrivatePagesSection";
+import { useVault } from "../../context/VaultContext";
 
 // Format remote URL for display - extract user/repo from full URL
 function formatRemoteUrl(url: string | null): string {
@@ -92,6 +95,7 @@ export function GeneralSettingsSection() {
     lastError,
     clearError,
   } = useGit();
+  const { status: vault } = useVault();
 
   const [remoteUrl, setRemoteUrl] = useState("");
   const [showRemoteInput, setShowRemoteInput] = useState(false);
@@ -102,6 +106,7 @@ export function GeneralSettingsSection() {
     paths: string[];
     folders: string[];
   } | null>(null);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
   // Load template from settings on mount
   useEffect(() => {
     const loadTemplate = async () => {
@@ -178,6 +183,18 @@ export function GeneralSettingsSection() {
       console.error("Failed to open folder:", err);
       toast.error("Failed to open folder");
     }
+  };
+
+  const exportWorkspace = (includePrivate: boolean) => {
+    if (!notesFolder) return;
+    const name = notesFolder.split(/[\\/]/).filter(Boolean).pop() ?? "Notes";
+    void exportFolderZip("", name, includePrivate);
+  };
+
+  // Only a folder with private pages has anything to ask about.
+  const handleExportWorkspace = () => {
+    if (vault?.hasVault) setExportDialogOpen(true);
+    else exportWorkspace(false);
   };
 
   const handleImportZip = async () => {
@@ -320,12 +337,7 @@ export function GeneralSettingsSection() {
             </p>
             <div className="flex items-center gap-1">
               <Button
-                onClick={() =>
-                  void exportFolderZip(
-                    "",
-                    notesFolder.split(/[\\/]/).filter(Boolean).pop() ?? "Notes",
-                  )
-                }
+                onClick={handleExportWorkspace}
                 variant="outline"
                 size="md"
               >
@@ -348,6 +360,18 @@ export function GeneralSettingsSection() {
                 Import from Notion
               </Button>
             </div>
+            <p className="text-xs text-text-muted mt-2 max-w-lg">
+              In Notion, export as HTML with Include subpages and Create folders
+              for subpages turned on. Then pick every .zip file it gives you.
+            </p>
+            {exportDialogOpen && (
+              <ExportZipDialog
+                title="Export Workspace"
+                description="Every note and asset, in one zip."
+                onExport={exportWorkspace}
+                onClose={() => setExportDialogOpen(false)}
+              />
+            )}
             {notionImport && (
               <NotionImportDialog
                 {...notionImport}
@@ -746,6 +770,13 @@ export function GeneralSettingsSection() {
 
       {/* Divider */}
       <div className="border-t border-border border-dashed" />
+
+      {notesFolder && (
+        <>
+          <PrivatePagesSection />
+          <div className="border-t border-border border-dashed" />
+        </>
+      )}
 
       {/* New Note Template */}
       <section className="pb-2">

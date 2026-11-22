@@ -1,6 +1,7 @@
 //! Zip export of notes with the assets they use, and import of such zips.
 
 use crate::relink;
+use crate::vault::PrivateSet;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
@@ -75,12 +76,13 @@ pub fn export_note(root: &Path, id: &str, markdown: &str, dest: &Path) -> Result
 /// under the folder's own name, plus `assets/`. The whole notes folder takes
 /// all of `assets/` and is zipped byte for byte. A subfolder takes only the
 /// assets its notes link to, and its notes' relative paths are rewritten for
-/// the shallower location. App and ignored folders and files other than notes
-/// are left out.
+/// the shallower location. App and ignored folders, files other than notes,
+/// and the files in `private` are left out.
 pub fn export_folder(
     root: &Path,
     folder: &str,
     ignored_dirs: &[String],
+    private: &PrivateSet,
     dest: &Path,
 ) -> Result<(), String> {
     let name = folder.rsplit('/').next().unwrap_or(folder);
@@ -90,7 +92,10 @@ pub fn export_folder(
         let entries = WalkDir::new(root.join(folder))
             .min_depth(1)
             .into_iter()
-            .filter_entry(|e| crate::is_visible_notes_entry(e, ignored_dirs));
+            .filter_entry(|e| {
+                crate::is_visible_notes_entry(e, ignored_dirs)
+                    && !(e.file_type().is_dir() && private.contains_dir(&relative(root, e.path())))
+            });
         for entry in entries {
             let entry = entry.map_err(message)?;
             let path = relative(root, entry.path());
@@ -100,7 +105,9 @@ pub fn export_folder(
                     .map_err(message)?;
                 continue;
             }
-            if crate::id_from_abs_path(root, entry.path(), ignored_dirs).is_none() {
+            if crate::id_from_abs_path(root, entry.path(), ignored_dirs).is_none()
+                || private.contains(&path)
+            {
                 continue;
             }
             let mut bytes = std::fs::read(entry.path()).map_err(message)?;
@@ -128,7 +135,7 @@ pub fn export_folder(
             if entry.file_type().is_dir() {
                 zip.add_directory(path, SimpleFileOptions::default())
                     .map_err(message)?;
-            } else {
+            } else if !private.contains(&path) {
                 add_asset(zip, root, &path)?;
             }
         }

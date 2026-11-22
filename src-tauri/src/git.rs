@@ -161,8 +161,12 @@ pub fn get_status(path: &Path) -> GitStatus {
     status
 }
 
-/// Stage all changes and commit
-pub fn commit_all(path: &Path, message: &str) -> GitResult {
+/// Stage all changes, run `after_stage`, and commit
+pub fn commit_all(
+    path: &Path,
+    message: &str,
+    after_stage: impl FnOnce() -> Result<(), String>,
+) -> GitResult {
     // Stage all changes
     let stage_output = match git_cmd()
         .args(["add", "-A"])
@@ -191,6 +195,14 @@ pub fn commit_all(path: &Path, message: &str) -> GitResult {
                 stderr,
                 if stdout.is_empty() { String::new() } else { format!("\n{}", stdout) }
             )),
+        };
+    }
+
+    if let Err(error) = after_stage() {
+        return GitResult {
+            success: false,
+            message: None,
+            error: Some(error),
         };
     }
 
@@ -298,10 +310,12 @@ pub fn fetch(path: &Path) -> GitResult {
     }
 }
 
-/// Pull from remote
-pub fn pull(path: &Path) -> GitResult {
+/// Pull from remote. With `no_commit`, a merge that is not a fast-forward
+/// stops before its commit, for `finish_merge`.
+pub fn pull(path: &Path, no_commit: bool) -> GitResult {
     let output = git_cmd()
         .args(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=10", "-c", "pull.rebase=false", "pull"])
+        .args(no_commit.then_some("--no-commit"))
         .env("GIT_SSH_COMMAND", "ssh -o ConnectTimeout=10")
         .current_dir(path)
         .output();
@@ -336,6 +350,70 @@ pub fn pull(path: &Path) -> GitResult {
             error: Some(format!("Failed to pull: {}", e)),
         },
     }
+}
+
+pub const CONFLICTS: &str = "Sync found conflicts. Resolve them to finish.";
+
+/// Runs git with `args` and `input` on stdin.
+pub fn output(path: &Path, args: &[&str], input: &[u8]) -> Result<std::process::Output, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let failed = |e: std::io::Error| format!("Failed to run git: {e}");
+    let mut child = git_cmd()
+        .args(args)
+        .current_dir(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(failed)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input).map_err(failed)?;
+    }
+    child.wait_with_output().map_err(failed)
+}
+
+/// Runs git with `args` and `input` on stdin; returns stdout, or stderr as the error.
+pub fn run_with_input(path: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
+    let output = output(path, args, input)?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// Runs git with `args`; returns stdout, or stderr as the error.
+pub fn run(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    run_with_input(path, args, b"")
+}
+
+pub fn merge_in_progress(path: &Path) -> bool {
+    run(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
+}
+
+fn result(outcome: Result<Vec<u8>, String>, message: &str) -> GitResult {
+    match outcome {
+        Ok(_) => GitResult {
+            success: true,
+            message: Some(message.to_string()),
+            error: None,
+        },
+        Err(error) => GitResult {
+            success: false,
+            message: None,
+            error: Some(error),
+        },
+    }
+}
+
+/// Commits a merge that `pull` left unfinished.
+pub fn finish_merge(path: &Path) -> GitResult {
+    result(run(path, &["commit", "--no-edit"]), "Merged changes")
+}
+
+pub fn abort_merge(path: &Path) -> GitResult {
+    result(run(path, &["merge", "--abort"]), "Sync canceled")
 }
 
 /// Get the URL of the 'origin' remote, if configured
@@ -552,7 +630,7 @@ fn parse_pull_error(stderr: &str) -> String {
     } else if stderr.contains("local changes") || stderr.contains("unstaged changes") {
         "Commit your changes before syncing with remote.".to_string()
     } else if stderr.contains("CONFLICT") || stderr.contains("Merge conflict") {
-        "Pull failed due to merge conflicts. Resolve conflicts manually.".to_string()
+        CONFLICTS.to_string()
     } else if stderr.contains("not possible to fast-forward") {
         "Pull failed: local and remote have diverged. Try pulling with rebase or merging manually.".to_string()
     } else if stderr.contains("unrelated histories") {

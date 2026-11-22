@@ -10,9 +10,12 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import * as gitService from "../services/git";
 import * as notesService from "../services/notes";
-import type { GitStatus } from "../services/git";
+import { errorMessage } from "../services/export";
+import type { ConflictFile, GitStatus } from "../services/git";
+import { MergeEditor, type ResolvedFile } from "../components/git/MergeEditor";
 import { useNotesData } from "./NotesContext";
 
 interface GitContextValue {
@@ -61,11 +64,14 @@ export function GitProvider({ children }: { children: ReactNode }) {
   const [gitEnabled, setGitEnabledState] = useState(false);
   const [isUpdatingGitEnabled, setIsUpdatingGitEnabled] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  // Files of an unfinished merge; the merge editor is open while non-empty
+  const [conflicts, setConflicts] = useState<ConflictFile[]>([]);
 
   // Reset git visibility when the notes folder is cleared
   const [prevNotesFolder, setPrevNotesFolder] = useState(notesFolder);
   if (notesFolder !== prevNotesFolder) {
     setPrevNotesFolder(notesFolder);
+    setConflicts([]);
     if (!notesFolder) {
       setGitEnabledState(false);
       setIsUpdatingGitEnabled(false);
@@ -232,11 +238,29 @@ export function GitProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshStatus]);
 
+  // A pull that conflicts fails and leaves the repo mid-merge
+  const openConflicts = useCallback(async () => {
+    const files = await gitService.getConflicts();
+    setConflicts(files);
+    return files.length > 0;
+  }, []);
+
+  const pushIfAhead = useCallback(async () => {
+    const freshStatus = await gitService.getGitStatus();
+    if (!(freshStatus.aheadCount > 0 && freshStatus.hasUpstream)) {
+      return { pushed: false, error: null };
+    }
+    const result = await gitService.gitPush();
+    if (result.error) setLastError(result.error);
+    return { pushed: !result.error, error: result.error };
+  }, []);
+
   const pull = useCallback(async (): Promise<string | false> => {
     setIsPulling(true);
     try {
       const result = await gitService.gitPull();
       if (result.error) {
+        if (await openConflicts()) return "Resolve conflicts to finish pulling";
         setLastError(result.error);
         return false;
       }
@@ -248,7 +272,7 @@ export function GitProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsPulling(false);
     }
-  }, [refreshStatus]);
+  }, [refreshStatus, openConflicts]);
 
   const sync = useCallback(async (): Promise<
     { ok: true; message: string } | { ok: false; error: string }
@@ -258,31 +282,26 @@ export function GitProvider({ children }: { children: ReactNode }) {
       // Step 1: Pull from remote
       const pullResult = await gitService.gitPull();
       if (pullResult.error) {
+        // The merge editor continues the sync once the merge is done
+        if (await openConflicts()) {
+          return { ok: true, message: "Resolve conflicts to finish syncing" };
+        }
         setLastError(pullResult.error);
         return { ok: false, error: pullResult.error };
       }
       const didPull = pullResult.message !== "Already up to date";
 
-      // Step 2: Check if we need to push
-      const freshStatus = await gitService.getGitStatus();
-      let didPush = false;
-
-      if (freshStatus.aheadCount > 0 && freshStatus.hasUpstream) {
-        const pushResult = await gitService.gitPush();
-        if (pushResult.error) {
-          setLastError(pushResult.error);
-          await refreshStatus();
-          if (didPull)
-            return {
-              ok: false,
-              error: `Pulled changes, but push failed: ${pushResult.error}`,
-            };
-          return { ok: false, error: pushResult.error };
-        }
-        didPush = true;
-      }
-
+      // Step 2: Push if ahead
+      const { pushed: didPush, error: pushError } = await pushIfAhead();
       await refreshStatus();
+      if (pushError) {
+        if (didPull)
+          return {
+            ok: false,
+            error: `Pulled changes, but push failed: ${pushError}`,
+          };
+        return { ok: false, error: pushError };
+      }
 
       if (didPull && didPush)
         return { ok: true, message: "Synced — pulled and pushed" };
@@ -296,6 +315,49 @@ export function GitProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsSyncing(false);
     }
+  }, [refreshStatus, openConflicts, pushIfAhead]);
+
+  const finishMerge = useCallback(
+    async (resolved: ResolvedFile[]): Promise<string | null> => {
+      try {
+        // One at a time: each call stages into the same git index
+        for (const { path, resolution } of resolved) {
+          await gitService.resolveConflict(path, resolution);
+        }
+        const result = await gitService.finishMerge();
+        if (result.error) return result.error;
+      } catch (err) {
+        return errorMessage(err, "Failed to finish the merge");
+      }
+      setConflicts([]);
+
+      // Continue the sync that hit the conflicts
+      setIsSyncing(true);
+      try {
+        const { pushed, error } = await pushIfAhead();
+        await refreshStatus();
+        if (error) toast.error(`Merged, but push failed: ${error}`);
+        else toast.success(pushed ? "Merged and pushed" : "Merged");
+      } catch (err) {
+        toast.error(errorMessage(err, "Merged, but push failed"));
+      } finally {
+        setIsSyncing(false);
+      }
+      return null;
+    },
+    [pushIfAhead, refreshStatus],
+  );
+
+  const abortMerge = useCallback(async (): Promise<string | null> => {
+    try {
+      const result = await gitService.abortMerge();
+      if (result.error) return result.error;
+    } catch (err) {
+      return errorMessage(err, "Failed to cancel the merge");
+    }
+    setConflicts([]);
+    await refreshStatus();
+    return null;
   }, [refreshStatus]);
 
   const addRemote = useCallback(
@@ -452,6 +514,27 @@ export function GitProvider({ children }: { children: ReactNode }) {
     }
   }, [notesFolder, gitAvailable, gitEnabled, refreshStatus]);
 
+  // The repo can already be mid-merge when the folder opens
+  useEffect(() => {
+    if (!notesFolder || !gitAvailable || !gitEnabled || !status?.isRepo) {
+      return undefined;
+    }
+    let cancelled = false;
+    void gitService.getConflicts().then(
+      (files) => {
+        if (!cancelled) setConflicts(files);
+      },
+      (err: unknown) => {
+        if (!cancelled) {
+          setLastError(errorMessage(err, "Failed to read merge conflicts"));
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [notesFolder, gitAvailable, gitEnabled, status?.isRepo]);
+
   // Poll remote for changes periodically (every 60s) when a remote is configured
   // Fetch is separated from status to keep status checks fast and offline-friendly
   // Uses recursive setTimeout to prevent overlapping runs on slow networks
@@ -560,7 +643,18 @@ export function GitProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <GitContext.Provider value={value}>{children}</GitContext.Provider>;
+  return (
+    <GitContext.Provider value={value}>
+      {children}
+      {conflicts.length > 0 && (
+        <MergeEditor
+          files={conflicts}
+          onFinish={finishMerge}
+          onCancel={abortMerge}
+        />
+      )}
+    </GitContext.Provider>
+  );
 }
 
 export function useGit() {

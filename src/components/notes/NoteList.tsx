@@ -18,6 +18,8 @@ import { useDeleteNoteWarning } from "../../lib/folderTree";
 import * as notesService from "../../services/notes";
 import { FolderTreeView } from "./FolderTreeView";
 import { PinIcon, CopyIcon, TrashIcon } from "../icons";
+import { useVault } from "../../context/VaultContext";
+import { PrivacyMenuItem } from "../vault/PrivacyMenuItem";
 import type { Settings } from "../../types/note";
 
 const menuItemClass =
@@ -68,6 +70,7 @@ interface NoteItemProps {
   modified: number;
   isSelected: boolean;
   isPinned: boolean;
+  isPrivate: boolean;
   onSelect: (id: string) => void;
   depth?: number;
   showFolderPrefix?: boolean;
@@ -80,6 +83,7 @@ export const NoteItem = memo(function NoteItem({
   modified,
   isSelected,
   isPinned,
+  isPrivate,
   onSelect,
   depth,
   showFolderPrefix = true,
@@ -114,6 +118,7 @@ export const NoteItem = memo(function NoteItem({
         meta={formatDate(modified)}
         isSelected={isSelected}
         isPinned={isPinned}
+        isPrivate={isPrivate}
         onClick={handleClick}
       />
     </div>
@@ -128,6 +133,7 @@ interface NoteItemWithMenuProps {
   modified: number;
   isSelected: boolean;
   isPinned: boolean;
+  isPrivate: boolean;
   onSelect: (id: string) => void;
   onPin: (id: string) => Promise<void>;
   onUnpin: (id: string) => Promise<void>;
@@ -143,6 +149,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
   modified,
   isSelected,
   isPinned,
+  isPrivate,
   onSelect,
   onPin,
   onUnpin,
@@ -182,6 +189,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
             modified={modified}
             isSelected={isSelected}
             isPinned={isPinned}
+            isPrivate={isPrivate}
             onSelect={onSelect}
           />
         </div>
@@ -206,6 +214,12 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
             <CopyIcon className="w-4 h-4 stroke-[1.6]" />
             Copy Filepath
           </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <PrivacyMenuItem
+            id={id}
+            title={cleanTitle(title)}
+            className={menuItemClass}
+          />
           <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item
             className={
@@ -246,6 +260,7 @@ export function NoteList({
     unpinNote,
     isLoading,
   } = useNotes();
+  const { privateIds } = useVault();
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
@@ -390,6 +405,7 @@ export function NoteList({
             modified={item.modified}
             isSelected={selectedNoteId === item.id}
             isPinned={pinnedIds.has(item.id)}
+            isPrivate={privateIds.has(item.id)}
             onSelect={selectNote}
             onPin={pinNote}
             onUnpin={unpinNote}

@@ -265,6 +265,7 @@ test("folder menu and settings export zips and import one", async ({ app }) => {
   await expect.poll(() => app.calls("export_folder_zip")).toHaveLength(1);
   expect((await app.calls("export_folder_zip"))[0].args).toEqual({
     folder: "Work",
+    includePrivate: false,
     dest: "/Users/me/Desktop/Work.zip",
   });
 
@@ -273,6 +274,7 @@ test("folder menu and settings export zips and import one", async ({ app }) => {
   await expect.poll(() => app.calls("export_folder_zip")).toHaveLength(2);
   expect((await app.calls("export_folder_zip"))[1].args).toEqual({
     folder: "",
+    includePrivate: false,
     dest: "/Users/me/Desktop/notes.zip",
   });
 
