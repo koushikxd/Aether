@@ -287,16 +287,18 @@ fn rename_folder_rewrites_links_into_it() {
     notes.write("Projects/Plan.md", "# Plan\n\n[Inbox](../Inbox.md)\n");
     notes.write("Inbox.md", "# Inbox\n\n[Plan](Projects/Plan.md)\n");
 
-    tauri::async_runtime::block_on(crate::rename_folder(
+    let new_path = tauri::async_runtime::block_on(crate::rename_folder(
         "Projects".to_string(),
-        "Work Stuff".to_string(),
+        "Work: Stuff".to_string(),
         notes.state(),
     ))
     .expect("rename_folder");
 
     notes.save_artifact("rename_folder_rewrites_links_into_it");
-    assert_eq!(notes.read("Work Stuff/Plan.md"), "# Plan\n\n[Inbox](../Inbox.md)\n");
-    assert_eq!(notes.read("Inbox.md"), "# Inbox\n\n[Plan](Work%20Stuff/Plan.md)\n");
+    // The name is sanitized on disk, and the path returned is the one on disk
+    assert_eq!(new_path, "Work- Stuff");
+    assert_eq!(notes.read("Work- Stuff/Plan.md"), "# Plan\n\n[Inbox](../Inbox.md)\n");
+    assert_eq!(notes.read("Inbox.md"), "# Inbox\n\n[Plan](Work-%20Stuff/Plan.md)\n");
 }
 
 #[test]

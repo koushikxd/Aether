@@ -39,7 +39,7 @@ Aether opens notes in tabs, like a browser. Each tab shows one note and keeps it
 
 ### Notes that change
 
-- Deleting a note closes its tab. Deleting a page also closes the tabs of its sub-pages. This includes deletes from outside the app, picked up by the file watcher.
+- Deleting a note closes its tab. Deleting a page also closes the tabs of its sub-pages. Deletes from outside the app, picked up by the file watcher, close the tabs of other notes. The open note keeps its tab.
 - Renaming or moving a note keeps its tab. The tab, its history, and the closed-tab list follow the new path. Sub-pages of a renamed or moved page follow too.
 
 ### Scroll position
@@ -76,7 +76,7 @@ Open tabs, their order, and the active tab are saved per notes folder and restor
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab, wrapping around               |
 | `Cmd+[` / `Cmd+]`             | Back / forward in the active tab                   |
 
-While the command menu is open, `Cmd+1` to `Cmd+9` run its rows instead, and the other tab shortcuts are off. In Settings, `Cmd+1` to `Cmd+5` switch settings sections.
+While the command menu is open, `Cmd+1` to `Cmd+9` run its rows instead, and `Cmd+T`, `Cmd+Shift+T`, `Ctrl+Tab`, and `Ctrl+Shift+Tab` are off. In Settings, `Cmd+1` to `Cmd+5` switch settings sections.
 
 ## Implementation
 

@@ -158,11 +158,37 @@ test.describe("tab state", () => {
     });
     await openFromSidebar(app, "Alpha");
     await newTabFromPalette(app, "Beta");
+    // The list refresh the watcher starts must not drop the inactive tab
+    await app.page.evaluate(() => {
+      if (window.aetherFake) window.aetherFake.moveLag = 200;
+    });
     await app.drag("Alpha", "Folder");
     await expect.poll(() => app.file("Folder/Alpha.md")).toBeDefined();
     // A key, not a click: dnd-kit swallows clicks for 50ms after a drag
     await app.page.keyboard.press("ControlOrMeta+1");
     await expectTabs(app, ["Alpha", "Beta"], "Alpha");
+  });
+
+  test("a renamed folder's tabs follow the name the disk got", async ({
+    app,
+  }) => {
+    await app.seed({
+      ...NOTES,
+      "Plans/Inside.md": "# Inside\n\nInside body.\n",
+    });
+    await app.open("Plans/Inside");
+    await expect(app.editor).toContainText("Inside body.");
+    await newTabFromPalette(app, "Alpha");
+    await app.row("Plans").click({ button: "right" });
+    await app.page.getByRole("menuitem", { name: "Rename" }).click();
+    const input = app.page
+      .getByRole("alertdialog", { name: "Rename Folder" })
+      .getByRole("textbox");
+    await input.fill("Q1: Plans");
+    await input.press("Enter");
+    await expect.poll(() => app.file("Q1- Plans/Inside.md")).toBeDefined();
+    await app.page.keyboard.press("ControlOrMeta+1");
+    await expectTabs(app, ["Inside", "Alpha"], "Inside");
   });
 
   test("switching tabs restores the scroll position", async ({ app }) => {
@@ -179,6 +205,62 @@ test.describe("tab state", () => {
     await scroller.evaluate((el) => el.scrollTo(0, 1500));
     await newTabFromPalette(app, "Alpha");
     await tab(app, "Long").click();
+    await expect(app.editor).toContainText("Long body.");
+    await expect
+      .poll(() => scroller.evaluate((el) => Math.round(el.scrollTop)))
+      .toBe(1500);
+  });
+
+  test("leaving a tab before its note loads keeps its saved scroll", async ({
+    app,
+  }) => {
+    const long = Array.from({ length: 150 }, (_, i) => `Line ${i}`).join(
+      "\n\n",
+    );
+    await app.seed({
+      ...NOTES,
+      "Long.md": `# Long\n\nLong body.\n\n${long}\n`,
+    });
+    await openFromSidebar(app, "Long");
+    const scroller = app.page.locator("[data-editor-scroll]");
+    await expect(app.editor).toContainText("Line 149");
+    await scroller.evaluate((el) => el.scrollTo(0, 1500));
+    await newTabFromPalette(app, "Alpha");
+    await newTabFromPalette(app, "Beta");
+    await tab(app, "Alpha").click();
+    await expect(app.editor).toContainText("Alpha body.");
+
+    // Long's note is still loading when Beta takes over
+    await app.hold("read_note");
+    await tab(app, "Long").click();
+    await tab(app, "Beta").click();
+    await app.release("read_note");
+    await expect(app.editor).toContainText("Beta body.");
+
+    await tab(app, "Long").click();
+    await expect(app.editor).toContainText("Long body.");
+    await expect
+      .poll(() => scroller.evaluate((el) => Math.round(el.scrollTop)))
+      .toBe(1500);
+  });
+
+  test("opening a tab's note from the sidebar restores its scroll", async ({
+    app,
+  }) => {
+    const long = Array.from({ length: 150 }, (_, i) => `Line ${i}`).join(
+      "\n\n",
+    );
+    await app.seed({
+      ...NOTES,
+      "Long.md": `# Long\n\nLong body.\n\n${long}\n`,
+    });
+    await openFromSidebar(app, "Long");
+    const scroller = app.page.locator("[data-editor-scroll]");
+    await expect(app.editor).toContainText("Line 149");
+    await scroller.evaluate((el) => el.scrollTo(0, 1500));
+    await newTabFromPalette(app, "Alpha");
+    await openFromSidebar(app, "Long");
+    await expectTabs(app, ["Long", "Alpha"], "Long");
     await expect(app.editor).toContainText("Long body.");
     await expect
       .poll(() => scroller.evaluate((el) => Math.round(el.scrollTop)))
@@ -380,6 +462,29 @@ test.describe("opening in a new tab", () => {
     await tab(app, "Index").click();
     await app.editor.getByRole("link", { name: "To Beta" }).click();
     await expectTabs(app, ["Index", "Gamma", "Beta"], "Beta");
+  });
+
+  test("Duplicate in the command menu shows the copy during a move", async ({
+    app,
+  }) => {
+    await app.seed({
+      ...NOTES,
+      "Folder/Inside.md": "# Inside\n\nInside body.\n",
+    });
+    await openFromSidebar(app, "Alpha");
+    await app.hold("move_note");
+    await app.drag("Gamma", "Folder");
+    await app.page.keyboard.press("ControlOrMeta+k");
+    await menu(app).getByRole("textbox").fill("Duplicate Current Note");
+    await app.page.keyboard.press("Enter");
+    await expect(strip(app).getByRole("tab")).toHaveCount(2);
+    await expect(strip(app).getByRole("tab").nth(1)).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // The copy's title, not the original's
+    await expect(app.editor.locator("h1")).not.toHaveText("Alpha");
+    await app.release("move_note");
   });
 
   test("Cmd+N, Cmd+Shift+N, and Duplicate open their note in a new tab", async ({

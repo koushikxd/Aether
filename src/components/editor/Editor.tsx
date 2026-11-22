@@ -2437,6 +2437,7 @@ export function Editor({
           )}
           {currentNote && !previewMode && (
             <NoteInfoPanel
+              key={currentNote.id}
               noteId={currentNote.id}
               modified={currentNote.modified}
               getText={() =>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNotes } from "../../context/NotesContext";
+import { useNotesActions } from "../../context/NotesContext";
 import { outermostIds, useDeleteNotesWarning } from "../../lib/folderTree";
 import {
   AlertDialog,
@@ -29,7 +29,7 @@ interface SelectionBarProps {
 
 /** Shown in selection mode: the count, bulk delete, and Done. */
 export function SelectionBar({ ids, onExit }: SelectionBarProps) {
-  const { deleteNote } = useNotes();
+  const { deleteNote } = useNotesActions();
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Deleting a page takes its sub-pages, so selected sub-pages are skipped

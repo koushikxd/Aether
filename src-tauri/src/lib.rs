@@ -1801,7 +1801,7 @@ async fn rename_folder(
     old_path: String,
     new_name: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let folder = {
         let app_config = state.app_config.read().expect("app_config read lock");
         app_config
@@ -1891,9 +1891,9 @@ async fn rename_folder(
         }
     }
 
-    relink_and_reindex(&state, &folder_root, vec![(old_path, new_path)]).await;
+    relink_and_reindex(&state, &folder_root, vec![(old_path, new_path.clone())]).await;
 
-    Ok(())
+    Ok(new_path)
 }
 
 #[tauri::command]

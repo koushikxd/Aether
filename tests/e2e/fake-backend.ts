@@ -33,6 +33,8 @@ export interface FakeBackend {
   emit: (event: string, payload: unknown) => Promise<void>;
   /** Birth time `get_note_info` reports for every note (null = the platform has none). */
   noteCreated: number | null;
+  /** Ms `move_note` takes after the watcher reports the move (0 = no report). */
+  moveLag: number;
 }
 
 declare global {
@@ -397,6 +399,26 @@ function moveFolder(args: Args): Promise<null> | null {
   return null;
 }
 
+// Mirrors rename_folder: the name is sanitized like Rust's; returns the new path.
+function renameFolder(args: Args): Promise<string> | string {
+  const path = str(args, "oldPath");
+  const name = str(args, "newName")
+    .replace(/[/\\:*?"<>|]/g, "-")
+    .trim();
+  if (!name) return Promise.reject("Folder name cannot be empty");
+  if (!hasFolder(path)) return Promise.reject("Path is not a directory");
+  const slash = path.lastIndexOf("/");
+  const dest = slash >= 0 ? `${path.slice(0, slash)}/${name}` : name;
+  if (hasFolder(dest)) {
+    return Promise.reject("A folder with that name already exists");
+  }
+  const moves: Move[] = [[path, dest]];
+  moveFiles(path, dest);
+  followPins(moves);
+  relink(moves);
+  return dest;
+}
+
 // Folders exist only through the files in them, so an emptied sub-page
 // folder disappears on its own (Rust removes it explicitly).
 function hasFolder(path: string): boolean {
@@ -454,7 +476,11 @@ function moveNote(args: Args): Promise<string> | string {
   moves.forEach(([from, to]) => moveFiles(from, to));
   followPins(moves);
   relink(moves);
-  return newId;
+  if (!fake.moveLag) return newId;
+  // The real watcher reports the rename at once, while relinking still runs
+  return emit("file-change", { changed_ids: [id, newId] }).then(
+    () => new Promise((done) => setTimeout(() => done(newId), fake.moveLag)),
+  );
 }
 
 // Mirrors save_note: the file is named after the H1 and renamed, with its
@@ -559,6 +585,7 @@ const fake: FakeBackend = {
   emit,
   // 2026-03-15 12:00 UTC: the same calendar day in every time zone.
   noteCreated: 1773576000,
+  moveLag: 0,
 };
 
 const handlers: Record<string, Handler> = {
@@ -594,6 +621,7 @@ const handlers: Record<string, Handler> = {
   sub_page_counts: subPageCounts,
   move_note: moveNote,
   move_folder: moveFolder,
+  rename_folder: renameFolder,
   // Folders that hold any file, outside the hidden ones (Rust also lists empty folders).
   list_folders: () => {
     const folders = new Set<string>();

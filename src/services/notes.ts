@@ -51,7 +51,7 @@ export async function deleteFolder(path: string): Promise<void> {
 export async function renameFolder(
   oldPath: string,
   newName: string,
-): Promise<void> {
+): Promise<string> {
   return invoke("rename_folder", { oldPath, newName });
 }
 

@@ -72,3 +72,21 @@ test("created row is hidden when the platform has no birth time", async ({
   ]);
   await app.screenshot("note-info-no-created");
 });
+
+test("switching tabs closes the info panel", async ({ app }) => {
+  await app.seed({ "Plan.md": PLAN, "Other.md": "# Other\n\nOther body.\n" });
+  await app.open("Plan");
+  await expect(app.editor).toContainText("Hello from the fake backend.");
+  await app.page.keyboard.press("ControlOrMeta+t");
+  const palette = app.page.locator("[data-command-menu]");
+  await palette.getByRole("textbox").fill("Other");
+  await expect(palette.getByRole("button").first()).toContainText("Other");
+  await app.page.keyboard.press("Enter");
+  await expect(app.editor).toContainText("Other body.");
+
+  const panel = await openInfo(app);
+  await expect(field(panel, "Words")).toHaveText("3");
+  await app.page.keyboard.press("ControlOrMeta+1");
+  await expect(app.editor).toContainText("Hello from the fake backend.");
+  await expect(panel).toBeHidden();
+});

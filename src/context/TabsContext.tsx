@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -42,7 +43,10 @@ interface TabsContextValue {
   goBack?: () => void;
   /** Unset when the active tab has nothing to go forward to. */
   goForward?: () => void;
-  /** The scroll position to restore for this note, once, after a tab switch. */
+  /**
+   * The editor calls this when it shows a note. Returns the scroll position
+   * to restore for it, once, after a tab switch.
+   */
   takeScrollRestore: (noteId: string) => number | undefined;
 }
 
@@ -148,6 +152,8 @@ export function TabsProvider({ children }: { children: ReactNode }) {
   const [createdId, setCreatedId] = useState<string | null>(null);
   const scrollsRef = useRef(new Map<string, number>());
   const restoreRef = useRef<{ noteId: string; top: number } | null>(null);
+  // The note the editor shows, which can lag the active tab while it loads
+  const shownNoteRef = useRef<string | null>(null);
 
   // Updates during render are functional: one render can apply several
   const [prevKey, setPrevKey] = useState(storageKey);
@@ -228,37 +234,35 @@ export function TabsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  // Every tab switch goes through here, so the tab left behind keeps its scroll
-  const update = useCallback(
-    (next: (s: TabsState) => TabsState) => {
-      const leaving = state.activeTabId;
-      const result = next(state);
-      if (result === state) return;
-      if (leaving && result.activeTabId !== leaving) {
-        scrollsRef.current.set(leaving, scrollTop());
-        const entering = result.tabs.find((t) => t.id === result.activeTabId);
-        const top = entering && scrollsRef.current.get(entering.id);
-        restoreRef.current =
-          entering && top !== undefined
-            ? { noteId: tabNoteId(entering), top }
-            : null;
-      }
-      setState(result);
-    },
-    [state],
-  );
+  // Every tab switch, from a tab action or a selection, lands here before the
+  // editor loads the entering note, so the editor still shows the tab left behind
+  const leftTabRef = useRef(state.activeTabId);
+  useLayoutEffect(() => {
+    const leaving = leftTabRef.current;
+    leftTabRef.current = state.activeTabId;
+    if (!leaving || leaving === state.activeTabId) return;
+    const left = state.tabs.find((t) => t.id === leaving);
+    if (left && tabNoteId(left) === shownNoteRef.current) {
+      scrollsRef.current.set(leaving, scrollTop());
+    }
+    const top = state.activeTabId && scrollsRef.current.get(state.activeTabId);
+    restoreRef.current =
+      activeNoteId && typeof top === "number"
+        ? { noteId: activeNoteId, top }
+        : null;
+  }, [state.activeTabId, state.tabs, activeNoteId]);
 
   const openInNewTab = useCallback(
-    (noteId: string) => update((s) => placeNote(s, noteId, true)),
-    [update],
+    (noteId: string) => setState((s) => placeNote(s, noteId, true)),
+    [],
   );
 
   const activateTab = useCallback(
     (tabId: string) =>
-      update((s) =>
+      setState((s) =>
         s.tabs.some((t) => t.id === tabId) ? { ...s, activeTabId: tabId } : s,
       ),
-    [update],
+    [],
   );
 
   const activateIndex = useCallback(
@@ -279,18 +283,17 @@ export function TabsProvider({ children }: { children: ReactNode }) {
     [state, activateTab],
   );
 
-  const closeTab = useCallback(
-    (tabId: string) => {
-      const index = state.tabs.findIndex((t) => t.id === tabId);
-      if (index < 0 || state.tabs.length < 2) return;
-      scrollsRef.current.delete(tabId);
-      update((s) => ({
+  const closeTab = useCallback((tabId: string) => {
+    scrollsRef.current.delete(tabId);
+    setState((s) => {
+      const index = s.tabs.findIndex((t) => t.id === tabId);
+      if (index < 0 || s.tabs.length < 2) return s;
+      return {
         ...removeTabs(s, (t) => t.id === tabId),
         closed: [...s.closed, { noteId: tabNoteId(s.tabs[index]), index }],
-      }));
-    },
-    [state.tabs, update],
-  );
+      };
+    });
+  }, []);
 
   const closeActiveTab = useCallback(() => {
     if (!state.activeTabId || state.tabs.length < 2) return false;
@@ -300,7 +303,7 @@ export function TabsProvider({ children }: { children: ReactNode }) {
 
   // Skips closed tabs whose note is gone or open again
   const reopenClosedTab = useCallback(() => {
-    update((s) => {
+    setState((s) => {
       const open = new Set(s.tabs.map(tabNoteId));
       const closed = [...s.closed];
       for (let entry = closed.pop(); entry; entry = closed.pop()) {
@@ -313,7 +316,7 @@ export function TabsProvider({ children }: { children: ReactNode }) {
       }
       return s.closed.length ? { ...s, closed } : s;
     });
-  }, [notesById, update]);
+  }, [notesById]);
 
   const moveTab = useCallback((tabId: string, toIndex: number) => {
     setState((s) => {
@@ -352,6 +355,7 @@ export function TabsProvider({ children }: { children: ReactNode }) {
   );
 
   const takeScrollRestore = useCallback((noteId: string) => {
+    shownNoteRef.current = noteId;
     const restore = restoreRef.current;
     if (restore?.noteId !== noteId) return undefined;
     restoreRef.current = null;

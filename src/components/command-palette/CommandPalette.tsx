@@ -33,7 +33,6 @@ import { cleanTitle } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
 import { useDeleteNoteWarning } from "../../lib/folderTree";
 import { editorMarkdown } from "../../lib/assetPaths";
-import { duplicateNote } from "../../services/notes";
 import {
   CopyIcon,
   DownloadIcon,
@@ -153,7 +152,7 @@ export function CommandPalette({
     createNote,
     deleteNote,
     currentNote,
-    refreshNotes,
+    duplicateNote,
     pinNote,
     unpinNote,
     notesFolder,
@@ -417,15 +416,9 @@ export function CommandPalette({
           shortcut: `${mod} D`,
           icon: <CopyIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
           action: async () => {
-            try {
-              const newNote = await duplicateNote(currentNote.id);
-              await refreshNotes();
-              openInNewTab(newNote.id);
-              onOpenNote();
-              onClose();
-            } catch (error) {
-              console.error("Failed to duplicate note:", error);
-            }
+            await duplicateNote(currentNote.id);
+            onOpenNote();
+            onClose();
           },
         },
         {
@@ -703,8 +696,7 @@ export function CommandPalette({
     commit,
     sync,
     isSyncing,
-    openInNewTab,
-    refreshNotes,
+    duplicateNote,
     settings,
     pinNote,
     unpinNote,

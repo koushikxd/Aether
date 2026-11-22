@@ -84,6 +84,11 @@ export function NotesProvider({ children }: { children: ReactNode }) {
 
   // Track recently saved note IDs to ignore file-change events from our own saves
   const recentlySavedRef = useRef<Set<string>>(new Set());
+  // In-app moves waiting on the backend. The watcher reports the new paths
+  // before the move returns its ids, and a list with them then would close
+  // the moved notes' tabs, so refreshes wait until the last move returns.
+  const movesInFlightRef = useRef(0);
+  const refreshDeferredRef = useRef(false);
   // Track pending refresh timeout to debounce refreshes during rapid saves
   const refreshTimeoutRef = useRef<number | null>(null);
   // Ref to access selectedNoteId in file watcher without re-registering listener
@@ -102,6 +107,10 @@ export function NotesProvider({ children }: { children: ReactNode }) {
 
   const refreshNotes = useCallback(async () => {
     if (!notesFolder) return;
+    if (movesInFlightRef.current > 0) {
+      refreshDeferredRef.current = true;
+      return;
+    }
     try {
       const notesList = await notesService.listNotes();
       setNotes(notesList);
@@ -109,6 +118,22 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       setError(err instanceof Error ? err.message : "Failed to load notes");
     }
   }, [notesFolder]);
+
+  // The caller emits the move's `moved` event right after this returns, before
+  // a refresh started here can list the new paths
+  const whileMoving = useCallback(
+    <T,>(move: () => Promise<T>): Promise<T> => {
+      movesInFlightRef.current++;
+      return move().finally(() => {
+        movesInFlightRef.current--;
+        if (movesInFlightRef.current === 0 && refreshDeferredRef.current) {
+          refreshDeferredRef.current = false;
+          void refreshNotes();
+        }
+      });
+    },
+    [refreshNotes],
+  );
 
   // Debounced refresh - coalesces rapid saves into a single refresh
   const scheduleRefresh = useCallback(() => {
@@ -469,14 +494,10 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       try {
         // A save still pending afterwards would write to the old path
         await flushPendingSaveRef.current?.();
-        await notesService.renameFolder(oldPath, newName);
-
-        // Compute new folder path
-        const lastSlash = oldPath.lastIndexOf("/");
-        const newPath =
-          lastSlash >= 0
-            ? `${oldPath.substring(0, lastSlash)}/${newName}`
-            : newName;
+        // The backend sanitizes the name, so the new path comes from it
+        const newPath = await whileMoving(() =>
+          notesService.renameFolder(oldPath, newName),
+        );
         const newIdOf = movedUnder(oldPath, newPath);
         emitNoteEvent({ type: "moved", newIdOf });
         await followSelectedNote(newIdOf);
@@ -488,14 +509,16 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         );
       }
     },
-    [refreshNotes, followSelectedNote],
+    [refreshNotes, followSelectedNote, whileMoving],
   );
 
   const moveNoteAction = useCallback(
     async (id: string, targetFolder: string) => {
       try {
         await flushPendingSaveRef.current?.();
-        const newId = await notesService.moveNote(id, targetFolder);
+        const newId = await whileMoving(() =>
+          notesService.moveNote(id, targetFolder),
+        );
         // A page's sub-pages move with it
         const newIdOf = movedFrom(id, newId);
         emitNoteEvent({ type: "moved", newIdOf });
@@ -505,14 +528,14 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         setError(err instanceof Error ? err.message : "Failed to move note");
       }
     },
-    [refreshNotes, followSelectedNote],
+    [refreshNotes, followSelectedNote, whileMoving],
   );
 
   const moveFolderAction = useCallback(
     async (path: string, targetParent: string) => {
       try {
         await flushPendingSaveRef.current?.();
-        await notesService.moveFolder(path, targetParent);
+        await whileMoving(() => notesService.moveFolder(path, targetParent));
 
         // Compute new folder path
         const folderName = path.includes("/")
@@ -530,13 +553,15 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         setError(err instanceof Error ? err.message : "Failed to move folder");
       }
     },
-    [refreshNotes, followSelectedNote],
+    [refreshNotes, followSelectedNote, whileMoving],
   );
 
   const setNotesFolder = useCallback(async (path: string) => {
     try {
       await notesService.setNotesFolder(path);
       setNotesFolderState(path);
+      setSelectedNoteId(null);
+      setCurrentNote(null);
       // Start file watcher after setting folder
       await notesService.startFileWatcher();
     } catch (err) {
