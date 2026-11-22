@@ -34,9 +34,33 @@ Runs on every push to `main` and on PRs. Validates formatting (`oxfmt --check`),
 - No commented-out code or TODOs in production code
 - Use `React.memo` for expensive list-item components
 - Use `useCallback`/`useMemo` for performance-critical paths
-- Debounce user-triggered operations (auto-save 300ms, search 150ms, file watcher 500ms, git status 1000ms)
+- Debounce user-triggered operations (auto-save 500ms (300ms in source mode), search 150ms, file watcher 500ms, git status 1000ms)
 - All operations should be non-blocking (async)
 - Error handling with user-friendly messages
+
+## Docs
+
+- `docs/projectspec.md`: every feature and shortcut, from the user's side.
+- `docs/architecture.md`: code layout, storage on disk, and the main flows (save, commit, pull, merge, private pages, export and import).
+
+Read them before working on a feature area.
+
+## Private Pages
+
+- A private page stays as plaintext on disk. Aether keeps it out of git with a block in `.git/info/exclude`. Aether's commit encrypts it into `.aether/vault/` with the key from the OS keychain, and that encrypted copy is what gets pushed. Logic lives in `src-tauri/src/vault.rs`. The merge editor is in `merge.rs`.
+- Aether installs `pre-commit` and `pre-merge-commit` hooks that refuse terminal commits holding private pages. Never commit or merge from the terminal in a notes folder with private pages, and never use `--no-verify` to get past the hook. Commit through the app.
+- Exports leave private pages out unless the user opts in through a dialog.
+
+## Testing
+
+```bash
+pnpm test         # Rust tests, then Playwright E2E
+pnpm test:rust    # cargo tests only
+pnpm test:e2e     # Playwright against a fake backend (tests/e2e/fake-*.ts)
+```
+
+- Every new Tauri command needs a handler in the E2E fake backend.
+- Never run `cargo fmt`: HEAD is not rustfmt-clean. Format a single file with `rustfmt --edition 2021 <file>`.
 
 ## Releasing
 
