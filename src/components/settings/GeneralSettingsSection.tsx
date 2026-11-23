@@ -21,7 +21,6 @@ import {
   importZip,
   pickNotionZips,
 } from "../../services/export";
-import { listFolders } from "../../services/notes";
 import { NotionImportDialog } from "./NotionImportDialog";
 import { ExportZipDialog } from "../vault/ExportZipDialog";
 import { PrivatePagesSection } from "./PrivatePagesSection";
@@ -102,10 +101,7 @@ export function GeneralSettingsSection() {
   const [isEditingRemote, setIsEditingRemote] = useState(false);
   const [noteTemplate, setNoteTemplate] = useState<string>("Untitled");
   const [previewNoteName, setPreviewNoteName] = useState<string>("Untitled");
-  const [notionImport, setNotionImport] = useState<{
-    paths: string[];
-    folders: string[];
-  } | null>(null);
+  const [notionImport, setNotionImport] = useState<string[] | null>(null);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   // Load template from settings on mount
   useEffect(() => {
@@ -204,9 +200,7 @@ export function GeneralSettingsSection() {
   const handleImportNotion = async () => {
     const paths = await pickNotionZips();
     if (!paths?.length) return;
-    // Without the folder list, the default new folder is still offered.
-    const folders = await listFolders().catch(() => []);
-    setNotionImport({ paths, folders });
+    setNotionImport(paths);
   };
 
   const handleAddRemote = async () => {
@@ -374,32 +368,13 @@ export function GeneralSettingsSection() {
             )}
             {notionImport && (
               <NotionImportDialog
-                {...notionImport}
+                paths={notionImport}
                 onClose={() => setNotionImport(null)}
               />
             )}
           </section>
         </>
       )}
-
-      {/* Divider */}
-      <div className="border-t border-border border-dashed" />
-
-      {/* Folders Section */}
-      <section className="pb-2">
-        <div className="flex items-center justify-between gap-6">
-          <div className="flex flex-col gap-0.75">
-            <div className="flex items-center gap-2">
-              <h2 className="text-xl font-medium">Enable Folders</h2>
-            </div>
-            <p className="text-sm text-text-muted max-w-lg">
-              Create and view nested folders to organize your notes. When off,
-              notes are shown in a flat list sorted by date.
-            </p>
-          </div>
-          <FoldersToggle />
-        </div>
-      </section>
 
       {/* Divider */}
       <div className="border-t border-border border-dashed" />
@@ -852,72 +827,6 @@ export function GeneralSettingsSection() {
         </p>
         <IgnoredFoldersEditor key={notesFolder} />
       </section>
-    </div>
-  );
-}
-
-function FoldersToggle() {
-  const [foldersEnabled, setFoldersEnabled] = useState<boolean | null>(null);
-  const [isUpdating, setIsUpdating] = useState(false);
-
-  useEffect(() => {
-    invoke<Settings>("get_settings")
-      .then((s) => {
-        setFoldersEnabled(s.foldersEnabled === true);
-      })
-      .catch((error) => {
-        console.error("Failed to load folder setting:", error);
-        setFoldersEnabled(false);
-      });
-  }, []);
-
-  const handleToggle = async (enabled: boolean) => {
-    if (isUpdating) return;
-    setIsUpdating(true);
-    try {
-      const settings = await invoke<Settings>("get_settings");
-      await invoke("update_settings", {
-        newSettings: { ...settings, foldersEnabled: enabled },
-      });
-      setFoldersEnabled(enabled);
-    } catch {
-      toast.error("Failed to update folder setting");
-    } finally {
-      setIsUpdating(false);
-    }
-  };
-
-  if (foldersEnabled === null) {
-    return (
-      <div className="flex gap-1 p-1 rounded-[10px] border border-border shrink-0">
-        <Button variant="ghost" size="xs" disabled>
-          Off
-        </Button>
-        <Button variant="ghost" size="xs" disabled>
-          On
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex gap-1 p-1 rounded-[10px] border border-border shrink-0">
-      <Button
-        onClick={() => handleToggle(false)}
-        variant={!foldersEnabled ? "primary" : "ghost"}
-        size="xs"
-        disabled={isUpdating}
-      >
-        Off
-      </Button>
-      <Button
-        onClick={() => handleToggle(true)}
-        variant={foldersEnabled ? "primary" : "ghost"}
-        size="xs"
-        disabled={isUpdating}
-      >
-        On
-      </Button>
     </div>
   );
 }

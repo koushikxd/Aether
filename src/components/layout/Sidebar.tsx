@@ -1,12 +1,5 @@
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   DndContext,
   DragOverlay,
@@ -23,35 +16,16 @@ import { Footer } from "./Footer";
 import { SelectionBar } from "./SelectionBar";
 import { outermostIds } from "../../lib/folderTree";
 import { Button, IconButton } from "../ui";
-import {
-  PlusIcon,
-  AddNoteIcon,
-  FolderPlusIcon,
-  NoteIcon,
-  LockIcon,
-} from "../icons";
+import { PlusIcon, NoteIcon, LockIcon } from "../icons";
 import { mod, isMac, isWindows } from "../../lib/platform";
-import * as notesService from "../../services/notes";
-import { FolderNameDialog } from "../notes/FolderNameDialog";
 
 interface SidebarProps {
   onOpenSettings?: () => void;
 }
 
 export function Sidebar({ onOpenSettings }: SidebarProps) {
-  const {
-    createNote,
-    createFolder,
-    notes,
-    selectedNoteId,
-    moveNote,
-    moveFolder,
-  } = useNotes();
+  const { createNote, notes, moveNote } = useNotes();
   const { status: vault, enterKey } = useVault();
-  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
-  const [folderDialogOpen, setFolderDialogOpen] = useState(false);
-  const [folderDialogParent, setFolderDialogParent] = useState("");
-  const [foldersEnabled, setFoldersEnabled] = useState(true);
   const [dragLabel, setDragLabel] = useState<string | null>(null);
   const [dragCount, setDragCount] = useState(1);
   const [multiSelectedNoteIds, setMultiSelectedNoteIds] = useState<Set<string>>(
@@ -85,13 +59,6 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       // A note in the selection drags the whole selection
       const selected = multiSelectedRef.current;
       setDragCount(selected.has(noteId) ? selected.size : 1);
-    } else if (data?.type === "folder" && typeof data.path === "string") {
-      const path = data.path;
-      const name = path.includes("/")
-        ? path.substring(path.lastIndexOf("/") + 1)
-        : path;
-      setDragLabel(name);
-      setDragCount(1);
     }
   }, []);
 
@@ -104,61 +71,50 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
 
       const activeData = active.data.current;
       const overData = over.data.current;
-      if (!activeData || !overData) return;
-
-      if (typeof overData.path !== "string") return;
+      if (activeData?.type !== "note" || typeof activeData.id !== "string") {
+        return;
+      }
+      if (typeof overData?.path !== "string") return;
+      // A page id, or "" for the top level
       const targetFolder = overData.path;
-      // A note dropped onto itself, or a page onto one of its own sub-pages
+      // A page dropped onto itself, or onto one of its own sub-pages
       const isInside = (id: string) =>
         targetFolder === id || targetFolder.startsWith(`${id}/`);
 
       try {
-        if (activeData.type === "note" && typeof activeData.id === "string") {
-          const noteId = activeData.id;
-          const selected = multiSelectedRef.current;
+        const noteId = activeData.id;
+        const selected = multiSelectedRef.current;
 
-          if (selected.has(noteId)) {
-            // A page moves its sub-pages along, so only the outermost move
-            const noteIds = outermostIds(selected).filter((id) => {
-              const parent = id.includes("/")
-                ? id.substring(0, id.lastIndexOf("/"))
-                : "";
-              return parent !== targetFolder && !isInside(id);
-            });
-            if (noteIds.length === 0) return;
-            let failures = 0;
-            for (const id of noteIds) {
-              try {
-                await moveNote(id, targetFolder);
-              } catch {
-                failures++;
-              }
-            }
-            if (failures > 0) {
-              toast.error(`Failed to move ${failures} note(s)`);
-            }
-            exitSelection();
-          } else {
-            const noteParent = noteId.includes("/")
-              ? noteId.substring(0, noteId.lastIndexOf("/"))
+        if (selected.has(noteId)) {
+          // A page moves its sub-pages along, so only the outermost move
+          const noteIds = outermostIds(selected).filter((id) => {
+            const parent = id.includes("/")
+              ? id.substring(0, id.lastIndexOf("/"))
               : "";
-            if (noteParent === targetFolder || isInside(noteId)) return;
-            await moveNote(noteId, targetFolder);
+            return parent !== targetFolder && !isInside(id);
+          });
+          if (noteIds.length === 0) return;
+          let failures = 0;
+          for (const id of noteIds) {
+            try {
+              await moveNote(id, targetFolder);
+            } catch {
+              failures++;
+            }
           }
-        } else if (
-          activeData.type === "folder" &&
-          typeof activeData.path === "string"
-        ) {
-          const folderPath = activeData.path;
-          if (isInside(folderPath)) return;
-          const folderParent = folderPath.includes("/")
-            ? folderPath.substring(0, folderPath.lastIndexOf("/"))
+          if (failures > 0) {
+            toast.error(`Failed to move ${failures} note(s)`);
+          }
+          exitSelection();
+        } else {
+          const noteParent = noteId.includes("/")
+            ? noteId.substring(0, noteId.lastIndexOf("/"))
             : "";
-          if (folderParent === targetFolder) return;
-          await moveFolder(folderPath, targetFolder);
+          if (noteParent === targetFolder || isInside(noteId)) return;
+          await moveNote(noteId, targetFolder);
         }
 
-        // Expand target folder so the moved item is visible
+        // Expand the target page so the moved page is visible
         if (targetFolder) {
           window.dispatchEvent(
             new CustomEvent("expand-folder", { detail: targetFolder }),
@@ -169,58 +125,8 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
         toast.error("Failed to move item");
       }
     },
-    [moveNote, moveFolder, exitSelection],
+    [moveNote, exitSelection],
   );
-
-  // Load folders setting
-  useEffect(() => {
-    notesService
-      .getSettings()
-      .then((s) => {
-        setFoldersEnabled(s.foldersEnabled === true);
-      })
-      .catch((error) => {
-        console.error("Failed to load settings:", error);
-        setFoldersEnabled(false);
-      });
-  }, []);
-
-  const handleNewFolder = useCallback(() => {
-    const lastSlash = selectedNoteId?.lastIndexOf("/") ?? -1;
-    setFolderDialogParent(
-      lastSlash > 0 ? selectedNoteId!.substring(0, lastSlash) : "",
-    );
-    setFolderDialogOpen(true);
-  }, [selectedNoteId]);
-
-  const handleFolderDialogConfirm = useCallback(
-    async (name: string) => {
-      try {
-        await createFolder(folderDialogParent, name);
-        setFolderDialogOpen(false);
-      } catch (error) {
-        console.error("Failed to create folder:", error);
-        toast.error("Failed to create folder");
-      }
-    },
-    [createFolder, folderDialogParent],
-  );
-
-  // Listen for create-new-folder event (from command palette / keyboard shortcut)
-  useEffect(() => {
-    const handleCreateFolder = () => {
-      // Derive parent folder from currently selected note
-      const lastSlash = selectedNoteId?.lastIndexOf("/") ?? -1;
-      setFolderDialogParent(
-        lastSlash > 0 ? selectedNoteId!.substring(0, lastSlash) : "",
-      );
-      setFolderDialogOpen(true);
-    };
-
-    window.addEventListener("create-new-folder", handleCreateFolder);
-    return () =>
-      window.removeEventListener("create-new-folder", handleCreateFolder);
-  }, [selectedNoteId]);
 
   return (
     <DndContext
@@ -244,53 +150,13 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
             </div>
           </div>
           <div className="flex items-center gap-px">
-            {foldersEnabled ? (
-              <DropdownMenu.Root
-                open={plusMenuOpen}
-                onOpenChange={setPlusMenuOpen}
-              >
-                <DropdownMenu.Trigger asChild>
-                  <IconButton variant="ghost" title="New Note or Folder">
-                    <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
-                  </IconButton>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal>
-                  <DropdownMenu.Content
-                    className="min-w-40 bg-bg border border-border rounded-md shadow-lg py-1 z-50"
-                    sideOffset={5}
-                    align="end"
-                    onCloseAutoFocus={(e) => e.preventDefault()}
-                  >
-                    <DropdownMenu.Item
-                      className="px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2"
-                      onSelect={() => createNote()}
-                    >
-                      <AddNoteIcon className="w-4 h-4 stroke-[1.6]" />
-                      <span className="flex-1">New Note</span>
-                      <kbd className="text-xs text-text-muted ml-2">
-                        {mod}
-                        {isMac ? "" : "+"}N
-                      </kbd>
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Item
-                      className="px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2"
-                      onSelect={handleNewFolder}
-                    >
-                      <FolderPlusIcon className="w-4 h-4 stroke-[1.6]" />
-                      New Folder
-                    </DropdownMenu.Item>
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
-            ) : (
-              <IconButton
-                variant="ghost"
-                onClick={() => createNote()}
-                title={`New Note (${mod}${isMac ? "" : "+"}N)`}
-              >
-                <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
-              </IconButton>
-            )}
+            <IconButton
+              variant="ghost"
+              onClick={() => createNote()}
+              title={`New Note (${mod}${isMac ? "" : "+"}N)`}
+            >
+              <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
+            </IconButton>
           </div>
         </div>
         {vault?.hasVault && !vault.unlocked && vault.lockedCount > 0 && (
@@ -317,16 +183,6 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
 
         {/* Footer with git status, commit, and settings */}
         <Footer onOpenSettings={onOpenSettings} />
-
-        {/* Folder name dialog */}
-        <FolderNameDialog
-          open={folderDialogOpen}
-          onOpenChange={setFolderDialogOpen}
-          onConfirm={handleFolderDialogConfirm}
-          title="Create new folder"
-          description="Enter a name for your new folder"
-          confirmLabel="Create"
-        />
       </div>
 
       {/* Drag overlay: floating label while dragging */}

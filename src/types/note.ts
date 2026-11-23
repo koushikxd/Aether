@@ -53,7 +53,6 @@ export interface Settings {
   theme: ThemeSettings;
   editorFont?: EditorFontSettings;
   gitEnabled?: boolean;
-  foldersEnabled?: boolean;
   pinnedNoteIds?: string[];
   textDirection?: TextDirection;
   editorWidth?: EditorWidth;
@@ -65,11 +64,4 @@ export interface Settings {
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;
-}
-
-export interface FolderNode {
-  name: string;
-  path: string;
-  children: FolderNode[];
-  notes: NoteMetadata[];
 }

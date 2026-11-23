@@ -36,37 +36,11 @@ export async function createNote(targetFolder?: string): Promise<Note> {
   return invoke("create_note", { targetFolder: targetFolder ?? null });
 }
 
-export async function listFolders(): Promise<string[]> {
-  return invoke("list_folders");
-}
-
-export async function createFolder(path: string): Promise<void> {
-  return invoke("create_folder", { path });
-}
-
-export async function deleteFolder(path: string): Promise<void> {
-  return invoke("delete_folder", { path });
-}
-
-export async function renameFolder(
-  oldPath: string,
-  newName: string,
-): Promise<string> {
-  return invoke("rename_folder", { oldPath, newName });
-}
-
 export async function moveNote(
   id: string,
   targetFolder: string,
 ): Promise<string> {
   return invoke("move_note", { id, targetFolder });
-}
-
-export async function moveFolder(
-  path: string,
-  targetParent: string,
-): Promise<void> {
-  return invoke("move_folder", { path, targetParent });
 }
 
 export async function duplicateNote(id: string): Promise<Note> {

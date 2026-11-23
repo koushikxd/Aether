@@ -12,11 +12,12 @@ interface PageNode {
   children: PageNode[];
 }
 
-/** The notes under `folder`, each under its nearest ancestor page. */
-function buildTree(notes: NoteMetadata[], folder: string): PageNode[] {
+/** The notes in `ids`, each under its nearest ancestor page. */
+function buildTree(notes: NoteMetadata[], ids: string[]): PageNode[] {
+  const offered = new Set(ids);
   const nodes = new Map<string, PageNode>();
   for (const note of notes) {
-    if (note.id.startsWith(`${folder}/`)) {
+    if (offered.has(note.id)) {
       nodes.set(note.id, {
         id: note.id,
         title: cleanTitle(note.title),
@@ -29,7 +30,7 @@ function buildTree(notes: NoteMetadata[], folder: string): PageNode[] {
     let parent: PageNode | undefined;
     for (
       let at = node.id.lastIndexOf("/");
-      !parent && at > folder.length;
+      !parent && at > 0;
       at = node.id.lastIndexOf("/", at - 1)
     ) {
       parent = nodes.get(node.id.slice(0, at));
@@ -141,14 +142,14 @@ const PickerRow = memo(function PickerRow({
 });
 
 interface PrivatePagePickerProps {
-  /** The import folder whose pages are offered. */
-  folder: string;
+  /** Ids of the pages offered. */
+  pageIds: string[];
   onBack: () => void;
   onDone: () => void;
 }
 
 export function PrivatePagePicker({
-  folder,
+  pageIds,
   onBack,
   onDone,
 }: PrivatePagePickerProps) {
@@ -159,7 +160,7 @@ export function PrivatePagePicker({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
 
-  const roots = useMemo(() => buildTree(notes, folder), [notes, folder]);
+  const roots = useMemo(() => buildTree(notes, pageIds), [notes, pageIds]);
   const search = query.trim().toLowerCase();
   const visible = useMemo(
     () => (search ? matchingIds(roots, search) : null),

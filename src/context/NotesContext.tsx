@@ -20,10 +20,6 @@ import { emitNoteEvent } from "../lib/noteEvents";
 const movedFrom = (from: string, to: string) => (id: string) =>
   id === from || id.startsWith(`${from}/`) ? to + id.slice(from.length) : id;
 
-/** Maps only what is under the `from/` folder to the `to/` folder. */
-const movedUnder = (from: string, to: string) => (id: string) =>
-  id.startsWith(`${from}/`) ? to + id.slice(from.length) : id;
-
 // Separate contexts to prevent unnecessary re-renders
 // Data context: changes frequently, only subscribed by components that need the data
 interface NotesDataContextValue {
@@ -40,6 +36,7 @@ interface NotesDataContextValue {
 // Actions context: stable references, rarely causes re-renders
 interface NotesActionsContextValue {
   selectNote: (id: string) => Promise<void>;
+  /** Creates a top-level page and opens it. */
   createNote: () => Promise<void>;
   consumePendingNewNote: (id: string) => boolean;
   /** `onSaved` runs with the saved note before any state changes. */
@@ -59,11 +56,7 @@ interface NotesActionsContextValue {
   pinNote: (id: string) => Promise<void>;
   unpinNote: (id: string) => Promise<void>;
   createNoteInFolder: (folderPath: string) => Promise<void>;
-  createFolder: (parentPath: string, name: string) => Promise<void>;
-  deleteFolder: (path: string) => Promise<void>;
-  renameFolder: (oldPath: string, newName: string) => Promise<void>;
   moveNote: (id: string, targetFolder: string) => Promise<void>;
-  moveFolder: (path: string, targetParent: string) => Promise<void>;
 }
 
 const NotesDataContext = createContext<NotesDataContextValue | null>(null);
@@ -187,15 +180,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
 
   const createNote = useCallback(async () => {
     try {
-      // Derive target folder from the selected note's parent path
-      let targetFolder: string | undefined;
-      if (selectedNoteIdRef.current) {
-        const lastSlash = selectedNoteIdRef.current.lastIndexOf("/");
-        if (lastSlash > 0) {
-          targetFolder = selectedNoteIdRef.current.substring(0, lastSlash);
-        }
-      }
-      const note = await notesService.createNote(targetFolder);
+      const note = await notesService.createNote();
       selectRequestIdRef.current += 1;
       pendingNewNoteIdRef.current = note.id;
       // Mark as recently saved to ignore file-change events from our own creation
@@ -441,75 +426,11 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     [refreshNotes],
   );
 
-  const createFolderAction = useCallback(
-    async (parentPath: string, name: string) => {
-      try {
-        const fullPath = parentPath ? `${parentPath}/${name}` : name;
-        await notesService.createFolder(fullPath);
-        await refreshNotes();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to create folder",
-        );
-      }
-    },
-    [refreshNotes],
-  );
-
-  const deleteFolderAction = useCallback(
-    async (path: string) => {
-      try {
-        await notesService.deleteFolder(path);
-        emitNoteEvent({
-          type: "deleted",
-          isDeleted: (id) => id.startsWith(`${path}/`),
-        });
-        // If the selected note was inside the deleted folder, clear selection
-        setSelectedNoteId((prevId) => {
-          if (prevId && prevId.startsWith(path + "/")) {
-            setCurrentNote(null);
-            return null;
-          }
-          return prevId;
-        });
-        await refreshNotes();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to delete folder",
-        );
-      }
-    },
-    [refreshNotes],
-  );
-
   const setPendingSaveFlush = useCallback(
     (flush: (() => Promise<void>) | null) => {
       flushPendingSaveRef.current = flush;
     },
     [],
-  );
-
-  const renameFolderAction = useCallback(
-    async (oldPath: string, newName: string) => {
-      try {
-        // A save still pending afterwards would write to the old path
-        await flushPendingSaveRef.current?.();
-        // The backend sanitizes the name, so the new path comes from it
-        const newPath = await whileMoving(() =>
-          notesService.renameFolder(oldPath, newName),
-        );
-        const newIdOf = movedUnder(oldPath, newPath);
-        emitNoteEvent({ type: "moved", newIdOf });
-        await followSelectedNote(newIdOf);
-
-        await refreshNotes();
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to rename folder",
-        );
-      }
-    },
-    [refreshNotes, followSelectedNote, whileMoving],
   );
 
   const moveNoteAction = useCallback(
@@ -526,31 +447,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         await refreshNotes();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to move note");
-      }
-    },
-    [refreshNotes, followSelectedNote, whileMoving],
-  );
-
-  const moveFolderAction = useCallback(
-    async (path: string, targetParent: string) => {
-      try {
-        await flushPendingSaveRef.current?.();
-        await whileMoving(() => notesService.moveFolder(path, targetParent));
-
-        // Compute new folder path
-        const folderName = path.includes("/")
-          ? path.substring(path.lastIndexOf("/") + 1)
-          : path;
-        const newPath = targetParent
-          ? `${targetParent}/${folderName}`
-          : folderName;
-        const newIdOf = movedUnder(path, newPath);
-        emitNoteEvent({ type: "moved", newIdOf });
-        await followSelectedNote(newIdOf);
-
-        await refreshNotes();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to move folder");
       }
     },
     [refreshNotes, followSelectedNote, whileMoving],
@@ -713,11 +609,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       pinNote,
       unpinNote,
       createNoteInFolder,
-      createFolder: createFolderAction,
-      deleteFolder: deleteFolderAction,
-      renameFolder: renameFolderAction,
       moveNote: moveNoteAction,
-      moveFolder: moveFolderAction,
     }),
     [
       selectNote,
@@ -734,11 +626,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       pinNote,
       unpinNote,
       createNoteInFolder,
-      createFolderAction,
-      deleteFolderAction,
-      renameFolderAction,
       moveNoteAction,
-      moveFolderAction,
     ],
   );
 

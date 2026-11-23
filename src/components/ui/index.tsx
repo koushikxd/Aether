@@ -2,7 +2,7 @@ import * as React from "react";
 import { type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "./Tooltip";
-import { ChevronRightIcon, LockIcon, PinIcon } from "../icons";
+import { ChevronRightIcon } from "../icons";
 
 // Re-export components
 export {
@@ -127,95 +127,6 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
   },
 );
 IconButton.displayName = "IconButton";
-
-// List item for sidebar
-interface ListItemProps {
-  title: string;
-  subtitle?: string;
-  meta?: string;
-  isSelected?: boolean;
-  /** Set in selection mode: whether the row is selected. */
-  pressed?: boolean;
-  isPinned?: boolean;
-  isPrivate?: boolean;
-  onClick?: (e: React.MouseEvent) => void;
-  /** Optional status icon to display next to meta */
-}
-
-export function ListItem({
-  title,
-  subtitle,
-  meta,
-  isSelected = false,
-  pressed,
-  isPinned = false,
-  isPrivate = false,
-  onClick,
-  onContextMenu,
-}: ListItemProps & { onContextMenu?: (e: React.MouseEvent) => void }) {
-  // Clean subtitle: treat whitespace-only or &nbsp; as empty
-  const cleanSubtitle = subtitle
-    ?.replace(/&nbsp;/g, " ")
-    .replace(/\u00A0/g, " ")
-    .trim();
-  const hasSubtitle = cleanSubtitle && cleanSubtitle.length > 0;
-
-  return (
-    // oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- tabIndex -1 row; keyboard navigation is handled by the note list container and App, so per-row Enter/Space would double-handle
-    <div
-      onClick={onClick}
-      onContextMenu={onContextMenu}
-      // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- a native button changes click focus (WebKit focuses the list container instead, showing its focus ring) and makes Space activate the row
-      role="button"
-      aria-pressed={pressed}
-      tabIndex={-1}
-      className={cn(
-        "w-full text-left px-2.5 py-2.25 transition-colors cursor-pointer select-none rounded-md",
-        "focus:outline-none focus-visible:outline-none",
-        isSelected
-          ? "bg-bg-muted group-focus/notelist:ring-1 group-focus/notelist:ring-text-muted"
-          : "hover:bg-bg-muted",
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1 min-w-0">
-          {isPinned && (
-            <PinIcon className="w-4.25 h-4.25 stroke-[1.6] fill-current text-text-muted shrink-0" />
-          )}
-          <span className={cn("text-sm font-medium truncate text-text")}>
-            {title}
-          </span>
-        </div>
-        {isPrivate && (
-          <span data-private-icon className="shrink-0">
-            <LockIcon className="w-3.5 h-3.5 stroke-[1.8] text-text-muted" />
-          </span>
-        )}
-      </div>
-      <div className="flex items-center gap-1.5 shrink-0">
-        {meta && (
-          <div
-            className={cn(
-              "text-xs whitespace-nowrap",
-              isSelected ? "text-text" : "text-text-muted",
-            )}
-          >
-            {meta}
-          </div>
-        )}
-        <p
-          className={cn(
-            "text-xs line-clamp-1 min-h-5",
-            hasSubtitle ? "text-text-muted" : "text-transparent",
-            isSelected ? "opacity-100" : "opacity-70",
-          )}
-        >
-          {hasSubtitle ? cleanSubtitle : "\u00A0"}
-        </p>
-      </div>
-    </div>
-  );
-}
 
 // Command palette item
 interface CommandItemProps {

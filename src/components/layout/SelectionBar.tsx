@@ -27,12 +27,12 @@ interface SelectionBarProps {
   onExit: () => void;
 }
 
-/** Shown in selection mode: the count, bulk delete, and Done. */
+/** Shown in selection mode: the count, bulk move and delete, and Done. */
 export function SelectionBar({ ids, onExit }: SelectionBarProps) {
   const { deleteNote } = useNotesActions();
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  // Deleting a page takes its sub-pages, so selected sub-pages are skipped
+  // A page takes its sub-pages along, so selected sub-pages are skipped
   const targets = useMemo(() => outermostIds(ids), [ids]);
   const warning = useDeleteNotesWarning(confirming ? targets : null);
 
@@ -46,6 +46,13 @@ export function SelectionBar({ ids, onExit }: SelectionBarProps) {
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [confirming, onExit]);
 
+  const handleMove = () => {
+    onExit();
+    window.dispatchEvent(
+      new CustomEvent("open-move-picker", { detail: { ids: targets } }),
+    );
+  };
+
   const handleDelete = async () => {
     setDeleting(true);
     for (const id of targets) await deleteNote(id);
@@ -56,15 +63,23 @@ export function SelectionBar({ ids, onExit }: SelectionBarProps) {
     // pr-12 clears the floating settings button the footer shows without git
     <div
       data-selection-bar
-      className="flex items-center gap-1.5 pl-4 pr-12 py-2 border-t border-border shrink-0"
+      className="flex flex-wrap items-center gap-x-1.5 gap-y-1 pl-4 pr-12 py-2 border-t border-border shrink-0"
     >
-      <span className="flex-1 text-sm text-text">{ids.size} selected</span>
-      <Button size="xs" variant="outline" onClick={() => setConfirming(true)}>
-        Delete
-      </Button>
-      <Button size="xs" onClick={onExit}>
-        Done
-      </Button>
+      <span className="flex-1 text-sm text-text whitespace-nowrap">
+        {ids.size} selected
+      </span>
+      {/* Wraps below the count when the sidebar is too narrow for one line */}
+      <div className="flex gap-1.5 ml-auto">
+        <Button size="xs" variant="outline" onClick={handleMove}>
+          Move to...
+        </Button>
+        <Button size="xs" variant="outline" onClick={() => setConfirming(true)}>
+          Delete
+        </Button>
+        <Button size="xs" onClick={onExit}>
+          Done
+        </Button>
+      </div>
 
       <AlertDialog open={confirming} onOpenChange={setConfirming}>
         <AlertDialogContent>
