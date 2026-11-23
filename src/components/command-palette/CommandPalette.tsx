@@ -50,7 +50,6 @@ import {
   OpenCodeIcon,
   OllamaIcon,
   FolderIcon,
-  FolderPlusIcon,
   KeyboardIcon,
   SearchIcon,
   NoteIcon,
@@ -301,16 +300,6 @@ export function CommandPalette({
           onClose();
         },
       },
-      {
-        id: "new-folder",
-        label: "New Folder",
-        shortcut: undefined,
-        icon: <FolderPlusIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
-        action: () => {
-          onClose();
-          window.dispatchEvent(new CustomEvent("create-new-folder"));
-        },
-      },
     ];
 
     // Navigation commands, each only when it has somewhere to go
@@ -419,6 +408,19 @@ export function CommandPalette({
             await duplicateNote(currentNote.id);
             onOpenNote();
             onClose();
+          },
+        },
+        {
+          id: "move-note",
+          label: "Move to...",
+          icon: <ArrowRightIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+          action: () => {
+            onClose();
+            window.dispatchEvent(
+              new CustomEvent("open-move-picker", {
+                detail: { ids: [currentNote.id] },
+              }),
+            );
           },
         },
         {

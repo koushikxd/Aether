@@ -27,6 +27,7 @@ import {
 import { AiEditModal } from "./components/ai/AiEditModal";
 import { AiResponseToast } from "./components/ai/AiResponseToast";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
+import { MovePageDialog } from "./components/notes/MovePageDialog";
 import { PreviewApp } from "./components/preview/PreviewApp";
 import {
   check as checkForUpdate,
@@ -473,7 +474,7 @@ function AppContent() {
         return;
       }
 
-      // Arrow keys for note navigation
+      // Arrow keys for note navigation, in the sidebar tree's order
       // Skip if folder tree view is handling its own navigation
       const isInFolderTree = !!target.closest("[data-folder-tree]");
       if (
@@ -483,17 +484,11 @@ function AppContent() {
         !isInFolderTree
       ) {
         e.preventDefault();
-        const currentIndex = notes.findIndex((n) => n.id === selectedNoteId);
-        let newIndex: number;
-
-        if (e.key === "ArrowDown") {
-          newIndex = currentIndex < notes.length - 1 ? currentIndex + 1 : 0;
-        } else {
-          newIndex = currentIndex > 0 ? currentIndex - 1 : notes.length - 1;
-        }
-
-        void selectNote(notes[newIndex].id);
-        window.dispatchEvent(new CustomEvent("focus-note-list"));
+        window.dispatchEvent(
+          new CustomEvent("step-note-list", {
+            detail: e.key === "ArrowDown" ? 1 : -1,
+          }),
+        );
         return;
       }
 
@@ -624,6 +619,7 @@ function AppContent() {
         />
       )}
 
+      <MovePageDialog />
       <KeyboardShortcutsModal
         open={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
