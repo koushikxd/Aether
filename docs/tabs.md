@@ -11,8 +11,8 @@ Aether opens notes in tabs, like a browser. Each tab shows one note and keeps it
 - These open the note in a new tab, placed right after the active tab:
   - `Cmd+T`, then pick a note.
   - `Cmd+Enter` on a note in the command menu (root, Search Notes, or Recent Notes).
-  - `Cmd+click` on a sidebar note row (folder tree or flat list), a link to a note or sub-page in the editor, or a wikilink.
-  - Every create action: `Cmd+N`, `Cmd+Shift+N`, the sidebar + button, New Note in the command menu, New Note in a folder's context menu, Duplicate (`Cmd+D` or the menu item), and the Sub-page slash command. The slash command inserts the link first, then opens the sub-page.
+  - `Cmd+click` on a sidebar page row, a link to a note or sub-page in the editor, or a wikilink.
+  - Every create action: `Cmd+N`, `Cmd+Shift+N`, the sidebar + button, New Note in the command menu, a row's + or New sub-page, Duplicate (`Cmd+D` or the menu item), and the Sub-page slash command. The slash command inserts the link first, then opens the sub-page.
 - With no tabs open (first launch, or a folder with no notes), the first note you open creates a tab.
 
 ### `Cmd+T`
@@ -109,8 +109,8 @@ While the command menu is open, `Cmd+1` to `Cmd+9` run its rows instead, and `Cm
 `NotesContext` emits events through `src/lib/noteEvents.ts` before it changes the selection, so the tabs see them first:
 
 - `created`: a note from `createNote`, `createNoteInFolder`, or `duplicateNote`. The next selection of that id opens a new tab.
-- `moved`: a rename (`saveNote` when the title changed), `renameFolder`, `moveNote`, or `moveFolder`. It carries a function from old id to new id, applied to every tab's history and to the closed list.
-- `deleted`: `deleteNote` (the page and its sub-pages) or `deleteFolder`. It carries a predicate, and matching tabs close.
+- `moved`: a rename (`saveNote` when the title changed) or `moveNote`. It carries a function from old id to new id, applied to every tab's history and to the closed list.
+- `deleted`: `deleteNote` (the page and its sub-pages). It carries a predicate, and matching tabs close.
 
 Notes deleted outside the app are caught when the notes list refreshes: tabs whose note is missing close, except the tab of the selected note. A just-renamed or just-created note can be briefly missing from the list, so the selected note's tab is never closed this way.
 

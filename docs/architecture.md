@@ -11,7 +11,7 @@ src-tauri/src/
   vault.rs          private pages: encryption, exclude block, hooks, commit/pull integration
   merge.rs          conflicts of an unfinished merge, public and private, for the merge editor
   relink.rs         rewrites relative links and image paths after moves
-  export.rs         zip export (note, folder, workspace) and zip import
+  export.rs         zip export (page with its sub-pages, workspace) and zip import
   notion_import.rs  Notion HTML export import
   tests.rs, vault_tests.rs, test_support.rs   cargo tests (cfg(test) only)
 src-tauri/capabilities/default.json         Tauri permissions
@@ -20,7 +20,7 @@ src/
   context/          NotesContext, GitContext, VaultContext, ThemeContext
   services/         thin invoke() wrappers, one file per area (notes, git, vault, export, ai, ...)
   components/       editor/, layout/, notes/, settings/, command-palette/, git/, vault/, ui/, icons/
-  lib/              shortcuts list, note navigation, folder tree, asset paths, platform helpers
+  lib/              shortcuts list, note navigation, page tree, asset paths, platform helpers
 tests/e2e/          Playwright specs plus the fake backend
 ```
 
@@ -29,7 +29,8 @@ tests/e2e/          Playwright specs plus the fake backend
 - `lib.rs` registers every command in `tauri::generate_handler![...]` near the end of `run()`. Blocking work (git, walking the folder, zips, encryption) runs in `tauri::async_runtime::spawn_blocking`.
 - `AppState` holds the app config (notes folder path), the per-folder `Settings`, a notes cache, the file watcher, the Tantivy `SearchIndex`, a watcher debounce map, and the `key_store` (OS keychain, or an in-memory store under `cfg(test)`).
 - Note ids are paths relative to the notes folder, with `/` separators and no `.md`. `id_from_abs_path` and `abs_path_from_id` convert, and the latter rejects path traversal. `EXCLUDED_DIRS` (`.git`, `.aether`, `.obsidian`, `.trash`, `assets`) and the user's ignored folders never hold notes.
-- A sub-page folder is `Page/` next to `Page.md` (`sub_page_dir`). Renames and deletes move or remove both.
+- A sub-page folder is `Page/` next to `Page.md` (`sub_page_dir`). Renames and deletes move or remove both. After a delete or move, `remove_empty_sub_page_dir` removes the old parent's `Page/` when it is empty and `Page.md` exists.
+- A bare page is a folder with no matching `.md` (`bare_page_dir`). `list_notes` lists it with its folder name as title and the folder's mtime. `read_note` returns `# <name>` without writing. `save_note` writes the file on the first save, and `create_bare_page_file` writes it first in `move_note` and `vault_set_private`. `delete_note` removes the folder.
 - Search: Tantivy index in `{APP_DATA}/search_index`, rebuilt when a folder opens and updated on save, create, delete, and watcher events. Queries are phrase-prefix over the title, then the content. A substring search is the fallback.
 - File watcher (`notify`): debounces 500 ms per path, updates the index, and emits `file-change`.
 - Other events: `set-notes-folder` (from the `aether` CLI) and `notion-import-progress`.
@@ -44,7 +45,8 @@ tests/e2e/          Playwright specs plus the fake backend
 - `ThemeContext` holds theme, fonts, page width, text direction, and zoom, persisted through the per-folder settings.
 - The editor (`components/editor/Editor.tsx`) saves 500 ms after the last edit (300 ms in source mode) through `save_note`.
 - The command menu is `components/command-palette/CommandPalette.tsx`. The shortcut reference is `src/lib/shortcuts.ts`. Global key handlers are in `App.tsx`, editor ones in `Editor.tsx`.
-- Recent notes, open tabs (`aether:tabs:<folder>`), and collapsed folders are in `localStorage`. Tab state never goes in `.aether/settings.json`, which is committed.
+- The sidebar tree is `components/notes/FolderTreeView.tsx`. `buildPageTree` in `src/lib/folderTree.ts` nests each page under its parent, newest first at every level. `App.tsx` turns `Up` and `Down` pressed outside the tree into `step-note-list` events, which the tree answers by selecting the next visible row. Drops are handled in `components/layout/Sidebar.tsx`. `components/notes/MovePageDialog.tsx` opens on the `open-move-picker` event (from the row menu, the selection bar, and the command menu) and calls `move_note` for each page.
+- Recent notes, open tabs (`aether:tabs:<folder>`), and collapsed pages (`aether:collapsedFolders`) are in `localStorage`. Tab state never goes in `.aether/settings.json`, which is committed.
 
 ## Data on disk
 
@@ -72,7 +74,7 @@ tests/e2e/          Playwright specs plus the fake backend
 
 ### Save and rename
 
-`save_note` derives the file name from the first heading. When the name changes, it writes in place first, then renames the file and its sub-page folder, then `relink::relink_notes` rewrites links across the folder and `vault::follow_moves` updates private marks. `vault::page_saved` refreshes the exclude block when a private page starts using a new asset. Moves (`move_note`, `move_folder`, `rename_folder`) use the same relink path. Deletes call `vault::prune_marks`.
+`save_note` derives the file name from the first heading. When the name changes, it writes in place first, then renames the file and its sub-page folder, then `relink::relink_notes` rewrites links across the folder and `vault::follow_moves` updates private marks. `vault::page_saved` refreshes the exclude block when a private page starts using a new asset. Moves (`move_note`) use the same relink path. Deletes call `vault::prune_marks`.
 
 ### Private pages (vault.rs)
 
@@ -103,7 +105,7 @@ When a pull fails, `GitContext` calls `git_conflicts`. If the list is not empty 
 
 ### Export and import (export.rs)
 
-`export_folder_zip(folder, dest, includePrivate)` leaves out the current private set unless `includePrivate`. The workspace export in settings asks only when the notes folder has a vault, and a folder export from the sidebar asks only when the folder holds a private page (`ExportZipDialog` in `components/vault`). `export_note_zip` takes the editor's current markdown. `import_zip` skips app folders and refuses entries that would escape the folder. `import_notion` converts Notion HTML zips and re-indexes.
+`export_folder_zip(folder, dest, includePrivate)` and `export_note_zip(id, markdown, dest, includePrivate)` leave out the current private set unless `includePrivate`. The workspace export in settings calls `export_folder_zip` on the whole notes folder and asks only when the notes folder has a vault. `export_note_zip` takes the editor's current markdown and adds the page's sub-page folder with the assets its notes use. The editor asks only when the page or a sub-page is private (`ExportZipDialog` in `components/vault`). For a private page it shows a warning instead of the checkbox, and confirming exports the page and its sub-pages with `includePrivate`. `import_zip` skips app folders and refuses entries that would escape the folder. `import_notion` converts Notion HTML zips, writes top-level pages at the notes folder root (`-1`, `-2` on a name clash), returns the ids it wrote for the private-page picker, and re-indexes.
 
 ## Tests
 
