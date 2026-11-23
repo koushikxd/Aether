@@ -113,7 +113,9 @@ import {
   exportNoteZip,
   noteClipboardHtml,
 } from "../../services/export";
+import { getVaultStatus } from "../../services/vault";
 import type { Note, Settings } from "../../types/note";
+import { ExportZipDialog } from "../vault/ExportZipDialog";
 import {
   SpinnerIcon,
   CircleCheckIcon,
@@ -350,6 +352,12 @@ export function Editor({
   const { textDirection } = useTheme();
   const [isSaving, setIsSaving] = useState(false);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
+  const [pageToExport, setPageToExport] = useState<{
+    id: string;
+    markdown: string;
+    title: string;
+    isPrivate: boolean;
+  } | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
 
   // Delay header transitions only when the sidebar needs to animate closed
@@ -2034,10 +2042,22 @@ export function Editor({
     }
   }, [editor, currentNote, getMarkdown]);
 
-  const handleExportZip = useCallback(() => {
+  // Only a page with private pages in it has anything to ask about.
+  const handleExportZip = useCallback(async () => {
     const id = loadedNoteIdRef.current;
     if (!editor || !currentNote || !id) return;
-    void exportNoteZip(id, getMarkdown(editor), currentNote.title);
+    const markdown = getMarkdown(editor);
+    const title = currentNote.title;
+    const { privateRoots, privateNoteIds } = await getVaultStatus();
+    const isPrivate = privateRoots.some(
+      (root) => root === id || id.startsWith(`${root}/`),
+    );
+    const page = { id, markdown, title, isPrivate };
+    if (isPrivate || privateNoteIds.some((p) => p.startsWith(`${id}/`))) {
+      setPageToExport(page);
+    } else {
+      void exportNoteZip(page.id, page.markdown, page.title, false);
+    }
   }, [editor, currentNote, getMarkdown]);
 
   const handleExportHtml = useCallback(() => {
@@ -2513,7 +2533,7 @@ export function Editor({
                   <>
                     <DropdownMenu.Item
                       className="px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2"
-                      onSelect={handleExportZip}
+                      onSelect={() => void handleExportZip()}
                     >
                       <DownloadIcon className="w-4 h-4 stroke-[1.6]" />
                       Export Zip
@@ -2806,6 +2826,26 @@ export function Editor({
           )}
         </div>
       </div>
+      {pageToExport && (
+        <ExportZipDialog
+          title={`Export ${pageToExport.title}`}
+          description="This page and its sub-pages, with their assets, in one zip."
+          privateWarning={
+            pageToExport.isPrivate
+              ? "This is a private page. It and its sub-pages are exported unencrypted."
+              : undefined
+          }
+          onExport={(includePrivate) =>
+            void exportNoteZip(
+              pageToExport.id,
+              pageToExport.markdown,
+              pageToExport.title,
+              includePrivate,
+            )
+          }
+          onClose={() => setPageToExport(null)}
+        />
+      )}
     </div>
   );
 }
