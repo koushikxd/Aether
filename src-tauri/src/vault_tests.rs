@@ -377,20 +377,16 @@ fn a_marked_page_keeps_its_mark_through_moves_and_renames() {
     ))
     .expect("retitle");
     roots.push(status(&notes).private_roots);
-    block_on(crate::rename_folder(
-        "Archive".into(),
-        "Old".into(),
+    block_on(crate::save_note(
+        Some("Archive".into()),
+        "# Old\n".into(),
         notes.state(),
     ))
-    .expect("rename");
+    .expect("retitle the bare parent");
     roots.push(status(&notes).private_roots);
     std::fs::create_dir_all(notes.root().join("Deep")).expect("deep");
-    block_on(crate::move_folder(
-        "Old".into(),
-        "Deep".into(),
-        notes.state(),
-    ))
-    .expect("move folder");
+    block_on(crate::move_note("Old".into(), "Deep".into(), notes.state()))
+        .expect("move the parent");
     let deep = status(&notes);
     let exclude = notes.read(".git/info/exclude");
     block_on(crate::delete_note("Deep/Old/Money".into(), notes.state())).expect("delete");
@@ -479,6 +475,66 @@ fn exclude_block_lists_exactly_the_private_set() {
 
     set_private(&notes, &["Q1 [draft]"], false).expect("unmark");
     assert_eq!(notes.read(".git/info/exclude"), "# user line\n*.tmp\n");
+}
+
+#[test]
+fn making_a_bare_page_private_creates_its_file_first() {
+    let notes = repo();
+    notes.write("Work/a.md", "# a\n");
+    generate(&notes);
+
+    let marked = set_private(&notes, &["Work"], true).expect("mark");
+
+    assert_eq!(notes.read("Work.md"), "# Work\n");
+    assert_eq!(marked.private_roots, ["Work"]);
+    assert_eq!(marked.private_note_ids, ["Work", "Work/a"]);
+}
+
+#[test]
+fn page_export_leaves_private_sub_pages_out_unless_asked() {
+    let notes = repo();
+    finance_notes(&notes);
+    notes.write("Finance/Budget.md", "# Budget\n");
+    generate(&notes);
+    set_private(&notes, &["Finance/Bank"], true).expect("mark");
+    let out = TempDir::new().expect("out");
+    let names = |include: bool| {
+        let dest = out.path().join(format!("{include}.zip"));
+        block_on(crate::export_note_zip(
+            "Finance".to_string(),
+            notes.read("Finance.md"),
+            dest.to_string_lossy().into_owned(),
+            include,
+            notes.state(),
+        ))
+        .expect("export");
+        let archive =
+            zip::ZipArchive::new(std::fs::File::open(dest).expect("zip")).expect("read zip");
+        let mut names: Vec<String> = archive
+            .file_names()
+            .map(|n| n.expect("name").into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+
+    let without = names(false);
+    let with = names(true);
+
+    save_text_artifact(
+        "page_export_leaves_private_sub_pages_out_unless_asked",
+        &format!("without: {without:?}\nwith: {with:?}"),
+    );
+    assert_eq!(without, ["Finance.md", "Finance/Budget.md"]);
+    assert_eq!(
+        with,
+        [
+            "Finance.md",
+            "Finance/Bank.md",
+            "Finance/Budget.md",
+            "assets/card.png"
+        ]
+    );
 }
 
 #[test]

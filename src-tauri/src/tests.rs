@@ -240,68 +240,6 @@ fn move_note_rewrites_its_links_and_links_to_it() {
 }
 
 #[test]
-fn move_folder_rewrites_links_inside_and_into_it() {
-    let notes = TestNotes::new();
-    notes.write(
-        "Projects/Plan.md",
-        "# Plan\n\n[Notes](Notes.md) [Inbox](../Inbox.md) ![](../assets/x.png) [Spec](spec.pdf)\n",
-    );
-    notes.write("Projects/Deep/Notes.md", "# Notes\n\n[Plan](../Plan.md#goals)\n");
-    notes.write("Projects/Notes.md", "# Notes\n\n[Plan](Plan.md)\n");
-    notes.write("Projects/spec.pdf", "pdf");
-    notes.write("assets/x.png", "png");
-    notes.write(
-        "Inbox.md",
-        "# Inbox\n\n[Plan](Projects/Plan.md) [Spec](Projects/spec.pdf) [Deep](Projects/Deep/Notes.md)\n",
-    );
-
-    tauri::async_runtime::block_on(crate::move_folder(
-        "Projects".to_string(),
-        "Archive/2026".to_string(),
-        notes.state(),
-    ))
-    .expect("move_folder");
-
-    notes.save_artifact("move_folder_rewrites_links_inside_and_into_it");
-    assert_eq!(
-        notes.read("Archive/2026/Projects/Plan.md"),
-        "# Plan\n\n[Notes](Notes.md) [Inbox](../../../Inbox.md) ![](../../../assets/x.png) [Spec](spec.pdf)\n"
-    );
-    assert_eq!(
-        notes.read("Archive/2026/Projects/Deep/Notes.md"),
-        "# Notes\n\n[Plan](../Plan.md#goals)\n"
-    );
-    assert_eq!(
-        notes.read("Archive/2026/Projects/Notes.md"),
-        "# Notes\n\n[Plan](Plan.md)\n"
-    );
-    assert_eq!(
-        notes.read("Inbox.md"),
-        "# Inbox\n\n[Plan](Archive/2026/Projects/Plan.md) [Spec](Archive/2026/Projects/spec.pdf) [Deep](Archive/2026/Projects/Deep/Notes.md)\n"
-    );
-}
-
-#[test]
-fn rename_folder_rewrites_links_into_it() {
-    let notes = TestNotes::new();
-    notes.write("Projects/Plan.md", "# Plan\n\n[Inbox](../Inbox.md)\n");
-    notes.write("Inbox.md", "# Inbox\n\n[Plan](Projects/Plan.md)\n");
-
-    let new_path = tauri::async_runtime::block_on(crate::rename_folder(
-        "Projects".to_string(),
-        "Work: Stuff".to_string(),
-        notes.state(),
-    ))
-    .expect("rename_folder");
-
-    notes.save_artifact("rename_folder_rewrites_links_into_it");
-    // The name is sanitized on disk, and the path returned is the one on disk
-    assert_eq!(new_path, "Work- Stuff");
-    assert_eq!(notes.read("Work- Stuff/Plan.md"), "# Plan\n\n[Inbox](../Inbox.md)\n");
-    assert_eq!(notes.read("Inbox.md"), "# Inbox\n\n[Plan](Work-%20Stuff/Plan.md)\n");
-}
-
-#[test]
 fn save_note_title_rename_rewrites_links_to_the_note() {
     let notes = TestNotes::new();
     notes.write("a/Draft.md", "# Draft\n\n[Self](Draft.md)\n");
@@ -343,25 +281,6 @@ fn pinned(notes: &TestNotes) -> Vec<String> {
 fn pin(notes: &TestNotes, ids: &[&str]) {
     notes.state().settings.write().expect("settings write lock").pinned_note_ids =
         Some(ids.iter().map(|id| id.to_string()).collect());
-}
-
-#[test]
-fn list_output_holds_a_page_as_note_and_folder_with_the_same_path() {
-    let notes = TestNotes::new();
-    notes.write("Page.md", "# Page\n");
-    notes.write("Page/Child.md", "# Child\n");
-    notes.write("Folder/Note.md", "# Note\n");
-
-    let mut ids: Vec<String> = run(crate::list_notes(notes.state()))
-        .expect("list_notes")
-        .into_iter()
-        .map(|n| n.id)
-        .collect();
-    ids.sort();
-    let folders = run(crate::list_folders(notes.state())).expect("list_folders");
-
-    assert_eq!(ids, ["Folder/Note", "Page", "Page/Child"]);
-    assert_eq!(folders, ["Folder", "Page"]);
 }
 
 #[test]
@@ -494,14 +413,143 @@ fn deleting_a_page_deletes_its_sub_pages() {
     assert!(!notes.root().join("Page").exists());
 }
 
+fn mtime(notes: &TestNotes, rel: &str) -> i64 {
+    std::fs::metadata(notes.root().join(rel))
+        .and_then(|m| m.modified())
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs() as i64
+}
+
 #[test]
-fn deleting_a_page_whose_file_is_gone_keeps_the_folder_of_the_same_name() {
+fn list_notes_holds_each_bare_folder_as_a_page() {
     let notes = TestNotes::new();
-    notes.write("Page/x.md", "# x\n");
+    notes.write("Work/a.md", "# a\n");
+    notes.write("Work/Deep/b.md", "# b\n");
+    notes.write("Page.md", "# Page\n");
+    notes.write("Page/c.md", "# c\n");
+    notes.write("assets/x.png", "png");
+    notes.write("node_modules/pkg/readme.md", "# readme\n");
+    std::fs::create_dir(notes.root().join(".vscode")).expect("create dot folder");
+    std::fs::create_dir(notes.root().join("Empty")).expect("create empty folder");
 
-    run(crate::delete_note("Page".to_string(), notes.state())).expect("delete_note");
+    let listed = run(crate::list_notes(notes.state())).expect("list_notes");
 
-    assert_eq!(notes.tree(), ["Page/x.md"]);
+    let mut ids: Vec<&str> = listed.iter().map(|n| n.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        [
+            "Empty",
+            "Page",
+            "Page/c",
+            "Work",
+            "Work/Deep",
+            "Work/Deep/b",
+            "Work/a"
+        ]
+    );
+    let work = listed.iter().find(|n| n.id == "Work").expect("Work listed");
+    assert_eq!((work.title.as_str(), work.preview.as_str()), ("Work", ""));
+    assert_eq!(work.modified, mtime(&notes, "Work"));
+    let deep = listed
+        .iter()
+        .find(|n| n.id == "Work/Deep")
+        .expect("Work/Deep listed");
+    assert_eq!(deep.title, "Deep");
+}
+
+#[test]
+fn reading_a_bare_page_gives_its_title_and_writes_nothing() {
+    let notes = TestNotes::new();
+    notes.write("A/Work/a.md", "# a\n");
+
+    let note = run(crate::read_note("A/Work".to_string(), notes.state())).expect("read_note");
+    let info = run(crate::get_note_info("A/Work".to_string(), notes.state()));
+
+    assert_eq!((note.id.as_str(), note.title.as_str()), ("A/Work", "Work"));
+    assert_eq!(note.content, "# Work\n");
+    assert_eq!(note.modified, mtime(&notes, "A/Work"));
+    assert!(info.is_ok(), "{info:?}");
+    assert_eq!(notes.tree(), ["A/Work/a.md"]);
+    assert_eq!(
+        run(crate::read_note("A/Nothing".to_string(), notes.state())).map(|n| n.id),
+        Err("Note not found".to_string())
+    );
+}
+
+#[test]
+fn saving_a_bare_page_creates_its_file_and_a_new_title_moves_its_folder() {
+    let notes = TestNotes::new();
+    notes.write("Work/a.md", "# a\n\n[Up](../Work.md)\n");
+    notes.write("Index.md", "# Index\n\n[a](Work/a.md)\n");
+
+    let saved = save(&notes, Some("Work"), "# Work\n\nHello\n").expect("save_note");
+    assert_eq!(saved.id, "Work");
+    assert_eq!(notes.read("Work.md"), "# Work\n\nHello\n");
+
+    std::fs::remove_file(notes.root().join("Work.md")).expect("make Work bare again");
+    let renamed = save(&notes, Some("Work"), "# Job\n").expect("save_note");
+
+    notes.save_artifact("saving_a_bare_page_creates_its_file_and_a_new_title_moves_its_folder");
+    assert_eq!(renamed.id, "Job");
+    assert_eq!(notes.tree(), ["Index.md", "Job.md", "Job/a.md"]);
+    assert_eq!(notes.read("Job/a.md"), "# a\n\n[Up](../Job.md)\n");
+    assert_eq!(notes.read("Index.md"), "# Index\n\n[a](Job/a.md)\n");
+}
+
+#[test]
+fn deleting_a_bare_page_deletes_its_folder() {
+    let notes = TestNotes::new();
+    notes.write("Work/a.md", "# a\n");
+    notes.write("Work/Deep/b.md", "# b\n");
+    notes.write("Work/spec.pdf", "pdf");
+    notes.write("Works.md", "# Works\n");
+
+    assert_eq!(delete_counts(&notes, "Work"), (2, 1));
+    delete(&notes, "Work");
+
+    assert_eq!(notes.tree(), ["Works.md"]);
+    assert!(!notes.root().join("Work").exists());
+}
+
+// On a case-insensitive file system `page.md` opens `Page.md`.
+#[test]
+fn deleting_a_bare_page_keeps_a_page_whose_name_differs_only_in_case() {
+    let notes = TestNotes::new();
+    notes.write("Page.md", "# Page\n");
+    notes.write("page/a.md", "# a\n");
+
+    delete(&notes, "page");
+
+    assert_eq!(notes.tree(), ["Page.md"]);
+}
+
+#[test]
+fn moving_a_bare_page_moves_its_folder() {
+    let notes = TestNotes::new();
+    notes.write("Work/a.md", "# a\n");
+    notes.write("Archive.md", "# Archive\n");
+    notes.write("Index.md", "# Index\n\n[a](Work/a.md)\n");
+
+    assert_eq!(move_note(&notes, "Work", "Archive"), "Archive/Work");
+
+    notes.save_artifact("moving_a_bare_page_moves_its_folder");
+    assert_eq!(
+        notes.tree(),
+        [
+            "Archive.md",
+            "Archive/Work.md",
+            "Archive/Work/a.md",
+            "Index.md"
+        ]
+    );
+    assert_eq!(notes.read("Archive/Work.md"), "# Work\n");
+    assert_eq!(
+        notes.read("Index.md"),
+        "# Index\n\n[a](Archive/Work/a.md)\n"
+    );
 }
 
 #[test]
@@ -923,8 +971,13 @@ Back [home](../Home.md), see [Sub](Plan/Sub.md).
 }
 
 #[test]
-fn note_zip_holds_the_note_at_its_root_and_the_assets_it_uses() {
+fn note_zip_holds_the_note_at_its_root_its_sub_pages_and_the_assets_they_use() {
     let notes = sample_workspace();
+    notes.write(
+        "Work/Projects/Plan/Deep/Leaf.md",
+        "# Leaf\n\n[Plan](../../Plan.md)\n",
+    );
+    notes.write("Work/Projects/Plan/node_modules/x.md", "# x\n");
     let out = tempfile::TempDir::new().expect("output dir");
     let dest = out.path().join("Plan.zip");
 
@@ -932,13 +985,25 @@ fn note_zip_holds_the_note_at_its_root_and_the_assets_it_uses() {
         "Work/Projects/Plan".to_string(),
         PLAN.to_string(),
         dest.to_string_lossy().into_owned(),
+        false,
         notes.state(),
     ))
     .expect("export_note_zip");
 
     let entries = zip_entries(&dest);
     let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["Plan.md", "assets/chart.png", "assets/spec v2.pdf"]);
+    assert_eq!(
+        names,
+        [
+            "Plan.md",
+            "Plan/Deep/",
+            "Plan/Deep/Leaf.md",
+            "Plan/Sub.md",
+            "assets/chart.png",
+            "assets/spec v2.pdf",
+            "assets/sub.png",
+        ]
+    );
     assert_eq!(
         String::from_utf8_lossy(&entries[0].1),
         "# Plan
@@ -947,12 +1012,20 @@ fn note_zip_holds_the_note_at_its_root_and_the_assets_it_uses() {
 
 [spec v2.pdf](assets/spec%20v2.pdf)
 
-Back [home](Home.md), see [Sub](Work/Projects/Plan/Sub.md).
+Back [home](Home.md), see [Sub](Plan/Sub.md).
 
 `![](../../assets/unused.png)`
 "
     );
-    assert_eq!(entries[1].1, bytes(&notes, "assets/chart.png"));
+    assert_eq!(
+        String::from_utf8_lossy(&entries[3].1),
+        "# Sub\n\n![](../assets/sub.png)\n\nUp to [Plan](../Plan.md)\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&entries[2].1),
+        "# Leaf\n\n[Plan](../../Plan.md)\n"
+    );
+    assert_eq!(entries[4].1, bytes(&notes, "assets/chart.png"));
 }
 
 /// The editor saves a resized image as `<img>` with its path HTML-escaped.
@@ -985,6 +1058,7 @@ fn note_zip_holds_images_whose_html_path_is_escaped() {
         "A".to_string(),
         ESCAPED_IMG.to_string(),
         dest.to_string_lossy().into_owned(),
+        false,
         notes.state(),
     ))
     .expect("export_note_zip");
@@ -1108,23 +1182,26 @@ fn write_zip(path: &std::path::Path, entries: &[(String, Vec<u8>)]) {
     zip.finish().expect("finish zip");
 }
 
-fn import_notion(
-    notes: &TestNotes,
-    zips: &[std::path::PathBuf],
-) -> crate::notion_import::Summary {
-    crate::notion_import::import(notes.root(), zips, None, &crate::get_default_ignored_patterns(), |_, _| {}).expect("notion import")
+fn import_notion(notes: &TestNotes, zips: &[std::path::PathBuf]) -> crate::notion_import::Summary {
+    crate::notion_import::import(
+        notes.root(),
+        zips,
+        &crate::get_default_ignored_patterns(),
+        |_, _| {},
+    )
+    .expect("notion import")
 }
 
 const NOTION_TREE: [&str; 12] = [
-    "Notion Import/Aether Import Fixture.md",
-    "Notion Import/Aether Import Fixture/Child Page-1.md",
-    "Notion Import/Aether Import Fixture/Child Page.md",
-    "Notion Import/Aether Import Fixture/Child Page/Grandchild Page.md",
-    "Notion Import/Aether Import Fixture/Tasks DB.md",
-    "Notion Import/Aether Import Fixture/Tasks DB/Check layout.md",
-    "Notion Import/Aether Import Fixture/Tasks DB/Draft outline.md",
-    "Notion Import/Aether Import Fixture/Tasks DB/Review export.md",
-    "Notion Import/Aether Import Fixture/Untitled.md",
+    "Aether Import Fixture.md",
+    "Aether Import Fixture/Child Page-1.md",
+    "Aether Import Fixture/Child Page.md",
+    "Aether Import Fixture/Child Page/Grandchild Page.md",
+    "Aether Import Fixture/Tasks DB.md",
+    "Aether Import Fixture/Tasks DB/Check layout.md",
+    "Aether Import Fixture/Tasks DB/Draft outline.md",
+    "Aether Import Fixture/Tasks DB/Review export.md",
+    "Aether Import Fixture/Untitled.md",
     "assets/fixture-document.pdf",
     "assets/image-1.png",
     "assets/image.png",
@@ -1165,7 +1242,6 @@ fn notion_import_maps_the_fixture_export() {
     let summary = crate::notion_import::import(
         notes.root(),
         &[notion_fixture_dir().join("aether-import-fixture.zip")],
-        None,
         &crate::get_default_ignored_patterns(),
         |current, total| progress.push((current, total)),
     )
@@ -1173,7 +1249,14 @@ fn notion_import_maps_the_fixture_export() {
 
     notes.save_artifact("notion_import_maps_the_fixture_export");
     assert_imported_fixture(&notes);
-    assert_eq!(summary.folder, "Notion Import");
+    let mut ids = summary.ids.clone();
+    ids.sort();
+    let mut notes_written: Vec<&str> = NOTION_TREE
+        .iter()
+        .filter_map(|p| p.strip_suffix(".md"))
+        .collect();
+    notes_written.sort();
+    assert_eq!(ids, notes_written);
     assert_eq!((summary.pages, summary.images, summary.files), (9, 2, 1));
     assert_eq!(summary.skipped, []);
     assert_eq!(progress.first(), Some(&(1, 9)));
@@ -1219,22 +1302,32 @@ fn notion_import_opens_part_zips_wrapped_in_an_outer_zip() {
 }
 
 #[test]
-fn notion_import_into_a_taken_folder_name_adds_a_suffix() {
+fn notion_import_suffixes_a_top_level_page_whose_name_is_taken() {
     let notes = TestNotes::new();
+    notes.write("Aether Import Fixture.md", "# Mine\n");
     let zip = notion_fixture_dir().join("aether-import-fixture.zip");
-    import_notion(&notes, std::slice::from_ref(&zip));
 
     let summary = import_notion(&notes, &[zip]);
 
-    assert_eq!(summary.folder, "Notion Import-1");
-    let page = notes.read("Notion Import-1/Aether Import Fixture.md");
-    assert!(page.contains(r#"<img src="../assets/image-2.png" width="32">"#), "{page}");
-    assert!(page.contains("[Child Page](Aether%20Import%20Fixture/Child%20Page-1.md)"), "{page}");
-    assert_eq!(
-        notes.read("Notion Import-1/Aether Import Fixture/Child Page.md"),
-        notes.read("Notion Import/Aether Import Fixture/Child Page.md")
-            .replace("image-1.png", "image-3.png")
+    notes.save_artifact("notion_import_suffixes_a_top_level_page_whose_name_is_taken");
+    assert_eq!(notes.read("Aether Import Fixture.md"), "# Mine\n");
+    assert!(
+        summary.ids.iter().any(|id| id == "Aether Import Fixture-1"),
+        "{:?}",
+        summary.ids
     );
+    let page = notes.read("Aether Import Fixture-1.md");
+    assert!(
+        page.contains(r#"<img src="assets/image.png" width="32">"#),
+        "{page}"
+    );
+    assert!(
+        page.contains("[Child Page](Aether%20Import%20Fixture-1/Child%20Page-1.md)"),
+        "{page}"
+    );
+    assert!(notes
+        .read("Aether Import Fixture-1/Child Page.md")
+        .contains("[Aether Import Fixture](../Aether%20Import%20Fixture-1.md)"));
 }
 
 const NOTION_PAGE_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -1259,7 +1352,7 @@ fn notion_import_keeps_unknown_blocks_and_missing_files_as_text_and_lists_them()
     let summary = import_notion(&notes, &[zip]);
 
     assert_eq!(
-        notes.read("Notion Import/Page.md"),
+        notes.read("Page.md"),
         "# Page\n\nBefore\n\nKept as text\n\nPage/missing.png\n\nAfter"
     );
     let skipped: Vec<(&str, &str)> = summary
@@ -1271,10 +1364,10 @@ fn notion_import_keeps_unknown_blocks_and_missing_files_as_text_and_lists_them()
         skipped,
         [
             (
-                "Notion Import/Page",
+                "Page",
                 "Unsupported block div.mystery-block, kept as plain text"
             ),
-            ("Notion Import/Page", "Page/missing.png is not in the export"),
+            ("Page", "Page/missing.png is not in the export"),
         ]
     );
 }
@@ -1292,7 +1385,7 @@ fn notion_import_skips_zip_entries_that_leave_the_folder() {
 
     let summary = import_notion(&notes, &[zip]);
 
-    assert_eq!(notes.tree(), ["Notion Import/Page.md"]);
+    assert_eq!(notes.tree(), ["Page.md"]);
     assert!(!notes.root().parent().expect("parent").join("evil.png").exists());
     assert!(!std::path::Path::new("/tmp/aether-notion-evil.png").exists());
     for name in bad {
@@ -1327,16 +1420,16 @@ fn notion_import_skips_suffixed_names_that_are_ignored_folders() {
     }
     write_zip(&zip, &entries);
 
-    crate::notion_import::import(notes.root(), &[zip], None, &["Projects-1".to_string()], |_, _| {})
+    crate::notion_import::import(notes.root(), &[zip], &["Projects-1".to_string()], |_, _| {})
         .expect("notion import");
 
     assert_eq!(
         notes.tree(),
         [
-            "Notion Import/Projects-2.md",
-            "Notion Import/Projects-2/Child1.md",
-            "Notion Import/Projects.md",
-            "Notion Import/Projects/Child0.md",
+            "Projects-2.md",
+            "Projects-2/Child1.md",
+            "Projects.md",
+            "Projects/Child0.md",
         ]
     );
 }
@@ -1365,9 +1458,9 @@ fn notion_import_suffixes_page_names_that_are_reserved_folders() {
         notes.save_artifact("notion_import_suffixes_page_names_that_are_reserved_folders");
         assert_eq!(
             notes.tree(),
-            [format!("Notion Import/{title}-1.md"), format!("Notion Import/{title}-1/Child.md")]
+            [format!("{title}-1.md"), format!("{title}-1/Child.md")]
         );
-        let parent = notes.read(&format!("Notion Import/{title}-1.md"));
+        let parent = notes.read(&format!("{title}-1.md"));
         assert!(parent.contains(&format!("[Child]({title}-1/Child.md)")), "{parent}");
     }
 }
@@ -1436,14 +1529,8 @@ fn reserved_folder_names_are_hidden_in_any_case() {
         .into_iter()
         .map(|n| n.id)
         .collect();
-    let folders = run(crate::list_folders(notes.state())).expect("list_folders");
 
     assert_eq!(ids, ["Note"]);
-    assert!(folders.is_empty(), "{folders:?}");
-    assert_eq!(
-        run(crate::create_folder("Assets".to_string(), notes.state())),
-        Err("'Assets' is a reserved folder name".to_string())
-    );
 }
 
 #[test]
@@ -1641,7 +1728,7 @@ y</code></pre><p>Use <code>a`b</code>, <code>`tick</code> and <code> pad </code>
     import_notion(&notes, &[zip]);
 
     assert_eq!(
-        notes.read("Notion Import/Page.md"),
+        notes.read("Page.md"),
         "# Page\n\n`````\n```js\nx\n````\ny\n`````\n\nUse ``a`b``, `` `tick `` and `  pad  `"
     );
 }

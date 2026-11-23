@@ -53,19 +53,91 @@ fn write_zip(dest: &Path, fill: impl FnOnce(&mut Zip) -> Result<(), String>) -> 
     result
 }
 
-/// Zips the note `id` as `<name>.md` at the zip root, with the files in
-/// `assets/` it links to beside it. Its relative paths are rewritten for the
-/// new location.
-pub fn export_note(root: &Path, id: &str, markdown: &str, dest: &Path) -> Result<(), String> {
-    let note_path = format!("{id}.md");
-    let name = format!("{}.md", id.rsplit('/').next().unwrap_or(id));
-    let moves = [(note_path.clone(), name.clone())];
-    let assets: BTreeSet<String> = used_assets(root, markdown, &note_path)
+/// Adds the notes under `folder` (`""` for the whole notes folder) and its
+/// subfolders, at the paths `moves` gives them. With `assets`, each note's
+/// relative paths are rewritten for its zipped path and the files in
+/// `assets/` it links to go into `assets`; without, notes go byte for byte.
+/// App and ignored folders, files other than notes, and the files in
+/// `private` are left out.
+fn add_notes_under(
+    zip: &mut Zip,
+    root: &Path,
+    folder: &str,
+    ignored_dirs: &[String],
+    private: &PrivateSet,
+    moves: &[relink::Move],
+    mut assets: Option<&mut BTreeSet<String>>,
+) -> Result<(), String> {
+    let entries = WalkDir::new(root.join(folder))
+        .min_depth(1)
         .into_iter()
-        .collect();
+        .filter_entry(|e| {
+            crate::is_visible_notes_entry(e, ignored_dirs)
+                && !(e.file_type().is_dir() && private.contains_dir(&relative(root, e.path())))
+        });
+    for entry in entries {
+        let entry = entry.map_err(message)?;
+        let path = relative(root, entry.path());
+        let zipped = relink::after_moves(&path, moves);
+        if entry.file_type().is_dir() {
+            zip.add_directory(zipped, SimpleFileOptions::default())
+                .map_err(message)?;
+            continue;
+        }
+        if crate::id_from_abs_path(root, entry.path(), ignored_dirs).is_none()
+            || private.contains(&path)
+        {
+            continue;
+        }
+        let mut bytes = std::fs::read(entry.path()).map_err(message)?;
+        if let Some(assets) = assets.as_deref_mut() {
+            // Notes that are not UTF-8 are not ones Aether edits; they go as they are.
+            if let Ok(markdown) = std::str::from_utf8(&bytes) {
+                assets.extend(used_assets(root, markdown, &path));
+                bytes = relink::rewrite_links(root, markdown, &path, &zipped, moves).into_bytes();
+            }
+        }
+        add_file(zip, &zipped, bytes.as_slice())?;
+    }
+    Ok(())
+}
+
+/// Zips the note `id` as `<name>.md` at the zip root and its sub-pages in
+/// `<name>/`, with the files in `assets/` they link to beside them. Their
+/// relative paths are rewritten for the new location. Ignored folders and
+/// the files in `private` are left out.
+pub fn export_note(
+    root: &Path,
+    id: &str,
+    markdown: &str,
+    ignored_dirs: &[String],
+    private: &PrivateSet,
+    dest: &Path,
+) -> Result<(), String> {
+    let note_path = format!("{id}.md");
+    let name = id.rsplit('/').next().unwrap_or(id);
+    let moves = [
+        (note_path.clone(), format!("{name}.md")),
+        (id.to_string(), name.to_string()),
+    ];
+    let mut assets = BTreeSet::new();
     write_zip(dest, |zip| {
-        let rewritten = relink::rewrite_links(root, markdown, &note_path, &name, &moves);
-        add_file(zip, &name, rewritten.as_bytes())?;
+        if !private.contains(&note_path) {
+            assets.extend(used_assets(root, markdown, &note_path));
+            let rewritten = relink::rewrite_links(root, markdown, &note_path, &moves[0].1, &moves);
+            add_file(zip, &moves[0].1, rewritten.as_bytes())?;
+        }
+        if crate::sub_page_dir(root, id, ignored_dirs).is_some() && !private.contains_dir(id) {
+            add_notes_under(
+                zip,
+                root,
+                id,
+                ignored_dirs,
+                private,
+                &moves,
+                Some(&mut assets),
+            )?;
+        }
         assets
             .iter()
             .try_for_each(|path| add_asset(zip, root, path))
@@ -89,38 +161,18 @@ pub fn export_folder(
     let moves = [(folder.to_string(), name.to_string())];
     let mut assets = BTreeSet::new();
     write_zip(dest, |zip| {
-        let entries = WalkDir::new(root.join(folder))
-            .min_depth(1)
-            .into_iter()
-            .filter_entry(|e| {
-                crate::is_visible_notes_entry(e, ignored_dirs)
-                    && !(e.file_type().is_dir() && private.contains_dir(&relative(root, e.path())))
-            });
-        for entry in entries {
-            let entry = entry.map_err(message)?;
-            let path = relative(root, entry.path());
-            let zipped = relink::after_moves(&path, &moves);
-            if entry.file_type().is_dir() {
-                zip.add_directory(zipped, SimpleFileOptions::default())
-                    .map_err(message)?;
-                continue;
-            }
-            if crate::id_from_abs_path(root, entry.path(), ignored_dirs).is_none()
-                || private.contains(&path)
-            {
-                continue;
-            }
-            let mut bytes = std::fs::read(entry.path()).map_err(message)?;
-            if !folder.is_empty() {
-                // Notes that are not UTF-8 are not ones Aether edits; they go as they are.
-                if let Ok(markdown) = std::str::from_utf8(&bytes) {
-                    assets.extend(used_assets(root, markdown, &path));
-                    bytes = relink::rewrite_links(root, markdown, &path, &zipped, &moves).into_bytes();
-                }
-            }
-            add_file(zip, &zipped, bytes.as_slice())?;
-        }
-        if !folder.is_empty() {
+        if folder.is_empty() {
+            add_notes_under(zip, root, folder, ignored_dirs, private, &moves, None)?;
+        } else {
+            add_notes_under(
+                zip,
+                root,
+                folder,
+                ignored_dirs,
+                private,
+                &moves,
+                Some(&mut assets),
+            )?;
             return assets
                 .iter()
                 .try_for_each(|path| add_asset(zip, root, path));

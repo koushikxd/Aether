@@ -63,9 +63,9 @@ First column paragraph.
 
 Second column paragraph.
 
-<img src="../assets/image.png" width="32">
+<img src="assets/image.png" width="32">
 
-[fixture-document.pdf](../assets/fixture-document.pdf)
+[fixture-document.pdf](assets/fixture-document.pdf)
 
 [Child Page](Aether%20Import%20Fixture/Child%20Page.md)
 

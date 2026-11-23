@@ -14,8 +14,6 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
-const DEFAULT_FOLDER: &str = "Notion Import";
-
 // Notion's text colors, as the editor's color menu offers them.
 const COLORS: [(&str, &str); 9] = [
     ("gray", "#787774"),
@@ -66,8 +64,8 @@ pub struct Skipped {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
-    /// Folder the pages were imported into.
-    pub folder: String,
+    /// Ids of the notes written.
+    pub ids: Vec<String>,
     pub pages: usize,
     pub images: usize,
     pub files: usize,
@@ -370,22 +368,21 @@ fn assign_parents(nodes: &mut [Note]) {
 
 /// Note ids for every node: `<parent>/<title>`, with `-N` added while the
 /// name is taken in this import or on disk.
-fn place(nodes: &[Note], root: &Path, folder: &str, ignored: &[String]) -> Vec<String> {
+fn place(nodes: &[Note], root: &Path, ignored: &[String]) -> Vec<String> {
     fn id_of(
         i: usize,
         nodes: &[Note],
         ids: &mut Vec<Option<String>>,
         taken: &mut HashSet<String>,
         root: &Path,
-        folder: &str,
         ignored: &[String],
     ) -> String {
         if let Some(id) = &ids[i] {
             return id.clone();
         }
         let dir = match nodes[i].parent {
-            Some(parent) => id_of(parent, nodes, ids, taken, root, folder, ignored),
-            None => folder.to_string(),
+            Some(parent) => id_of(parent, nodes, ids, taken, root, ignored),
+            None => String::new(),
         };
         let name = crate::sanitize_filename(&nodes[i].title);
         let base = join(&dir, &name);
@@ -407,7 +404,7 @@ fn place(nodes: &[Note], root: &Path, folder: &str, ignored: &[String]) -> Vec<S
     let mut ids = vec![None; nodes.len()];
     let mut taken = HashSet::new();
     (0..nodes.len())
-        .map(|i| id_of(i, nodes, &mut ids, &mut taken, root, folder, ignored))
+        .map(|i| id_of(i, nodes, &mut ids, &mut taken, root, ignored))
         .collect()
 }
 
@@ -1158,33 +1155,12 @@ fn list_kind(el: ElementRef) -> Option<&'static str> {
     })
 }
 
-/// The folder to import into: `folder`, or a new `Notion Import` folder
-/// (with `-N` when that name is taken).
-fn destination(root: &Path, folder: Option<&str>) -> Result<String, String> {
-    if let Some(folder) = folder {
-        crate::validate_folder_path(folder)?;
-        if !root.join(folder).is_dir() {
-            return Err(format!("The folder \"{folder}\" does not exist"));
-        }
-        return Ok(folder.to_string());
-    }
-    let mut name = DEFAULT_FOLDER.to_string();
-    let mut counter = 1;
-    while root.join(&name).exists() || root.join(format!("{name}.md")).exists() {
-        name = format!("{DEFAULT_FOLDER}-{counter}");
-        counter += 1;
-    }
-    std::fs::create_dir_all(root.join(&name)).map_err(message)?;
-    Ok(name)
-}
-
 /// Imports the Notion HTML export in `zips` (the parts of one export) into
-/// `folder` under the notes folder `root`, or into a new `Notion Import`
-/// folder. Calls `progress(written, total)` after each note.
+/// the notes folder `root`, its top-level pages at the root. Calls
+/// `progress(written, total)` after each note.
 pub fn import(
     root: &Path,
     zips: &[PathBuf],
-    folder: Option<&str>,
     ignored: &[String],
     mut progress: impl FnMut(usize, usize),
 ) -> Result<Summary, String> {
@@ -1196,8 +1172,7 @@ pub fn import(
         );
     }
     let (nodes, node_ids) = scan(&mut export)?;
-    let folder = destination(root, folder)?;
-    let ids = place(&nodes, root, &folder, ignored);
+    let ids = place(&nodes, root, ignored);
     let mut importer = Importer {
         root,
         notes: nodes
@@ -1218,15 +1193,15 @@ pub fn import(
         skipped,
     };
     let total = nodes.len();
-    let mut written = 0;
+    let mut written = Vec::new();
     let mut write = |id: &str, markdown: &str| -> Result<(), String> {
         let path = root.join(format!("{id}.md"));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(message)?;
         }
         std::fs::write(&path, markdown).map_err(|e| format!("Could not write {id}.md: {e}"))?;
-        written += 1;
-        progress(written, total);
+        written.push(id.to_string());
+        progress(written.len(), total);
         Ok(())
     };
     for (node, id) in nodes
@@ -1248,8 +1223,8 @@ pub fn import(
         }
     }
     Ok(Summary {
-        folder,
-        pages: written,
+        pages: written.len(),
+        ids: written,
         images: importer.images,
         files: importer.files,
         skipped: importer.skipped,

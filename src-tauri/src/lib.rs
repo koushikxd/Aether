@@ -140,8 +140,6 @@ pub struct Settings {
     pub sidebar_width_px: Option<u32>,
     #[serde(rename = "ollamaModel")]
     pub ollama_model: Option<String>,
-    #[serde(rename = "foldersEnabled")]
-    pub folders_enabled: Option<bool>,
     #[serde(rename = "ignoredPatterns")]
     pub ignored_patterns: Option<Vec<String>>,
     #[serde(rename = "customColorsLight")]
@@ -943,10 +941,55 @@ fn sub_page_dir(notes_root: &Path, id: &str, ignored_dirs: &[String]) -> Option<
     if !dir.is_dir() || is_hidden_dir(&name.to_string_lossy(), ignored_dirs) {
         return None;
     }
-    let mut siblings = std::fs::read_dir(dir.parent()?).ok()?;
-    siblings
-        .any(|entry| entry.is_ok_and(|e| e.file_name() == name))
-        .then_some(dir)
+    has_exact_name(&dir).then_some(dir)
+}
+
+/// Whether `path` exists under exactly its name: on a case-insensitive file
+/// system `page.md` also finds `Page.md`.
+fn has_exact_name(path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    std::fs::read_dir(parent).is_ok_and(|mut siblings| {
+        siblings.any(|entry| entry.is_ok_and(|e| e.file_name() == name))
+    })
+}
+
+/// The folder of note `id` when it is a bare page: a folder with no
+/// `id.md`, as Finder, a git clone, or another app can leave. A bare page
+/// reads as a page holding only its title, and gets its file on first save.
+fn bare_page_dir(notes_root: &Path, id: &str, ignored_dirs: &[String]) -> Option<PathBuf> {
+    if abs_path_from_id(notes_root, id).ok()?.exists() {
+        return None;
+    }
+    sub_page_dir(notes_root, id, ignored_dirs)
+}
+
+fn bare_page_markdown(id: &str) -> String {
+    format!("# {}\n", id.rsplit('/').next().unwrap_or(id))
+}
+
+/// Writes the file of note `id` when it is a bare page, for actions that
+/// need one.
+fn create_bare_page_file(
+    notes_root: &Path,
+    id: &str,
+    ignored_dirs: &[String],
+) -> Result<(), String> {
+    if bare_page_dir(notes_root, id, ignored_dirs).is_some() {
+        std::fs::write(abs_path_from_id(notes_root, id)?, bare_page_markdown(id))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn modified_secs(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Whether note `id` would take the name of an existing note, or of a folder
@@ -1190,6 +1233,7 @@ async fn list_notes(state: State<'_, AppState>) -> Result<Vec<NoteMetadata>, Str
     let discovered = tokio::task::spawn_blocking(move || {
         use walkdir::WalkDir;
         let mut results: Vec<(String, String, String, i64)> = Vec::new();
+        let mut folders: Vec<(String, i64)> = Vec::new();
         for entry in WalkDir::new(&path_clone)
             .max_depth(10)
             .into_iter()
@@ -1197,6 +1241,17 @@ async fn list_notes(state: State<'_, AppState>) -> Result<Vec<NoteMetadata>, Str
             .flatten()
         {
             let file_path = entry.path();
+            if entry.depth() > 0
+                && entry.file_type().is_dir()
+                && !entry.file_name().to_string_lossy().starts_with('.')
+            {
+                if let (Ok(rel), Ok(metadata)) =
+                    (file_path.strip_prefix(&path_clone), entry.metadata())
+                {
+                    let id = rel.to_string_lossy().replace('\\', "/");
+                    folders.push((id, modified_secs(&metadata)));
+                }
+            }
             if !file_path.is_file() {
                 continue;
             }
@@ -1213,6 +1268,15 @@ async fn list_notes(state: State<'_, AppState>) -> Result<Vec<NoteMetadata>, Str
                     let preview = generate_preview(&content);
                     results.push((id, title, preview, modified));
                 }
+            }
+        }
+        // Exact names, as in sub_page_dir: on a case-insensitive file system
+        // `page/` next to `Page.md` is a bare page of its own.
+        let pages: HashSet<String> = results.iter().map(|(id, ..)| id.clone()).collect();
+        for (id, modified) in folders {
+            if !pages.contains(&id) {
+                let title = id.rsplit('/').next().unwrap_or(&id).to_string();
+                results.push((id, title, String::new(), modified));
             }
         }
         results
@@ -1277,7 +1341,16 @@ async fn read_note(id: String, state: State<'_, AppState>) -> Result<Note, Strin
     let folder_path = PathBuf::from(&folder);
     let file_path = abs_path_from_id(&folder_path, &id)?;
     if !file_path.exists() {
-        return Err("Note not found".to_string());
+        let dir = sub_page_dir(&folder_path, &id, &ignored_dirs(&state)).ok_or("Note not found")?;
+        let metadata = fs::metadata(&dir).await.map_err(|e| e.to_string())?;
+        let content = bare_page_markdown(&id);
+        return Ok(Note {
+            id,
+            title: extract_title(&content),
+            content,
+            path: file_path.to_string_lossy().into_owned(),
+            modified: modified_secs(&metadata),
+        });
     }
 
     let content = fs::read_to_string(&file_path)
@@ -1319,8 +1392,10 @@ async fn get_note_info(id: String, state: State<'_, AppState>) -> Result<NoteInf
             .ok_or("Notes folder not set")?
     };
 
-    let file_path = abs_path_from_id(&PathBuf::from(&folder), &id)?;
-    let metadata = fs::metadata(&file_path)
+    let root = PathBuf::from(&folder);
+    let file_path = abs_path_from_id(&root, &id)?;
+    let path = bare_page_dir(&root, &id, &ignored_dirs(&state)).unwrap_or(file_path);
+    let metadata = fs::metadata(&path)
         .await
         .map_err(|_| "Note not found".to_string())?;
 
@@ -1486,15 +1561,13 @@ async fn delete_note(id: String, state: State<'_, AppState>) -> Result<(), Strin
 
     let folder_path = PathBuf::from(&folder);
     let file_path = abs_path_from_id(&folder_path, &id)?;
-    let existed = file_path.exists();
-    if existed {
+    if has_exact_name(&file_path) {
         fs::remove_file(&file_path)
             .await
             .map_err(|e| e.to_string())?;
     }
-    // A page takes its sub-pages with it. Without the page file, the folder
-    // is a plain one and stays.
-    if let Some(sub_pages) = sub_page_dir(&folder_path, &id, &ignored_dirs(&state)).filter(|_| existed) {
+    // A page takes its sub-pages with it, and a bare page is its folder.
+    if let Some(sub_pages) = sub_page_dir(&folder_path, &id, &ignored_dirs(&state)) {
         forget_notes_under(&state, &id);
         fs::remove_dir_all(&sub_pages)
             .await
@@ -1697,206 +1770,6 @@ fn validate_folder_path(path: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn list_folders(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-    let folder_path = PathBuf::from(&folder);
-
-    let ignored_dirs = {
-        let settings = state.settings.read().expect("settings read lock");
-        get_effective_ignored_dirs(&settings)
-    };
-
-    let fp = folder_path.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut folders = Vec::new();
-        use walkdir::WalkDir;
-        for entry in WalkDir::new(&fp)
-            .max_depth(10)
-            .into_iter()
-            .filter_entry(|e| is_visible_notes_entry(e, &ignored_dirs))
-            .flatten()
-        {
-            if entry.file_type().is_dir() && entry.path() != fp {
-                if let Ok(rel) = entry.path().strip_prefix(&fp) {
-                    let rel_str = rel.to_string_lossy().replace('\\', "/");
-                    if !rel_str.is_empty() {
-                        folders.push(rel_str);
-                    }
-                }
-            }
-        }
-        folders.sort();
-        folders
-    })
-    .await
-    .map_err(|e| format!("Failed to list folders: {}", e))
-}
-
-#[tauri::command]
-async fn create_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-
-    validate_folder_path(&path)?;
-
-    let target = PathBuf::from(&folder).join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-
-    if !target.starts_with(&folder) {
-        return Err("Invalid path: escapes notes folder".to_string());
-    }
-
-    fs::create_dir_all(&target)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn delete_folder(path: String, state: State<'_, AppState>) -> Result<(), String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-
-    validate_folder_path(&path)?;
-
-    let target = PathBuf::from(&folder).join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-
-    if !target.starts_with(&folder) {
-        return Err("Invalid path: escapes notes folder".to_string());
-    }
-
-    if !target.is_dir() {
-        return Err("Path is not a directory".to_string());
-    }
-
-    forget_notes_under(&state, &path);
-
-    fs::remove_dir_all(&target)
-        .await
-        .map_err(|e| e.to_string())?;
-    remove_empty_sub_page_dir(Path::new(&folder), parent_folder(&path));
-    vault::prune_marks(Path::new(&folder), &ignored_dirs(&state))?;
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn rename_folder(
-    old_path: String,
-    new_name: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-
-    validate_folder_path(&old_path)?;
-
-    // Sanitize new name (no slashes allowed in the name itself)
-    let sanitized_name = new_name
-        .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-")
-        .trim()
-        .to_string();
-    if sanitized_name.is_empty() {
-        return Err("Folder name cannot be empty".to_string());
-    }
-
-    let folder_root = PathBuf::from(&folder);
-    let old_target = folder_root.join(old_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-
-    if !old_target.starts_with(&folder_root) {
-        return Err("Invalid path: escapes notes folder".to_string());
-    }
-    if !old_target.is_dir() {
-        return Err("Path is not a directory".to_string());
-    }
-
-    // Build new path: same parent, new name
-    let new_target = old_target
-        .parent()
-        .ok_or("Cannot determine parent directory")?
-        .join(&sanitized_name);
-
-    if new_target.exists() {
-        return Err("A folder with that name already exists".to_string());
-    }
-
-    // Compute old and new path prefixes for updating IDs
-    let old_prefix = format!("{}/", old_path);
-    let new_path = if old_path.contains('/') {
-        let parent = &old_path[..old_path.rfind('/').unwrap()];
-        format!("{}/{}", parent, sanitized_name)
-    } else {
-        sanitized_name.clone()
-    };
-    let new_prefix = format!("{}/", new_path);
-
-    // Rename on disk
-    tokio::fs::rename(&old_target, &new_target)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Update pinned note IDs in settings
-    {
-        let mut settings = state.settings.write().expect("settings write lock");
-        if let Some(ref mut pinned) = settings.pinned_note_ids {
-            for id in pinned.iter_mut() {
-                if id.starts_with(&old_prefix) {
-                    *id = format!("{}{}", new_prefix, &id[old_prefix.len()..]);
-                } else if *id == old_path {
-                    *id = new_path.clone();
-                }
-            }
-        }
-        // Save settings
-        let _ = save_settings(&folder, &settings);
-    }
-
-    // Update cache
-    {
-        let mut cache = state.notes_cache.write().expect("cache write lock");
-        let updates: Vec<(String, String)> = cache
-            .keys()
-            .filter(|id| id.starts_with(&old_prefix))
-            .map(|id| {
-                let new_id = format!("{}{}", new_prefix, &id[old_prefix.len()..]);
-                (id.clone(), new_id)
-            })
-            .collect();
-        for (old_id, new_id) in updates {
-            if let Some(mut meta) = cache.remove(&old_id) {
-                meta.id = new_id.clone();
-                cache.insert(new_id, meta);
-            }
-        }
-    }
-
-    relink_and_reindex(&state, &folder_root, vec![(old_path, new_path.clone())]).await;
-
-    Ok(new_path)
-}
-
-#[tauri::command]
 async fn move_note(
     id: String,
     target_folder: String,
@@ -1911,8 +1784,9 @@ async fn move_note(
     };
     let folder_root = PathBuf::from(&folder);
     let source_path = abs_path_from_id(&folder_root, &id)?;
+    let sub_pages = sub_page_dir(&folder_root, &id, &ignored_dirs(&state));
 
-    if !source_path.exists() {
+    if !source_path.exists() && sub_pages.is_none() {
         return Err("Note not found".to_string());
     }
 
@@ -1935,7 +1809,6 @@ async fn move_note(
     }
 
     let dest_path = abs_path_from_id(&folder_root, &new_id)?;
-    let sub_pages = sub_page_dir(&folder_root, &id, &ignored_dirs(&state));
     let sub_pages_dest = dir_from_id(&folder_root, &new_id);
 
     // Ensure target directory exists
@@ -1947,6 +1820,7 @@ async fn move_note(
     if note_name_taken(&folder_root, &new_id, &[]) {
         return Err("A note with that name already exists in the target folder".to_string());
     }
+    create_bare_page_file(&folder_root, &id, &ignored_dirs(&state))?;
 
     rename_page(
         &source_path,
@@ -1965,112 +1839,6 @@ async fn move_note(
     relink_and_reindex(&state, &folder_root, moves).await;
 
     Ok(new_id)
-}
-
-#[tauri::command]
-async fn move_folder(
-    path: String,
-    target_parent: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-
-    validate_folder_path(&path)?;
-    if !target_parent.is_empty() {
-        validate_folder_path(&target_parent)?;
-    }
-
-    let folder_root = PathBuf::from(&folder);
-    let source = folder_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-
-    if !source.is_dir() {
-        return Err("Source is not a directory".to_string());
-    }
-
-    // Get folder name
-    let name = source
-        .file_name()
-        .ok_or("Cannot determine folder name")?
-        .to_string_lossy()
-        .to_string();
-
-    let dest = if target_parent.is_empty() {
-        folder_root.join(&name)
-    } else {
-        folder_root
-            .join(target_parent.replace('/', std::path::MAIN_SEPARATOR_STR))
-            .join(&name)
-    };
-
-    // Prevent moving into itself
-    if dest.starts_with(&source) {
-        return Err("Cannot move a folder into itself".to_string());
-    }
-
-    if dest.exists() {
-        return Err("A folder with that name already exists in the target".to_string());
-    }
-
-    // Ensure target parent exists
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
-    }
-
-    // Compute old and new path prefixes for updating IDs
-    let old_prefix = format!("{}/", path);
-    let new_path = if target_parent.is_empty() {
-        name.clone()
-    } else {
-        format!("{}/{}", target_parent, name)
-    };
-    let new_prefix = format!("{}/", new_path);
-
-    tokio::fs::rename(&source, &dest)
-        .await
-        .map_err(|e| e.to_string())?;
-    remove_empty_sub_page_dir(&folder_root, parent_folder(&path));
-
-    // Update pinned note IDs
-    {
-        let mut settings = state.settings.write().expect("settings write lock");
-        if let Some(ref mut pinned) = settings.pinned_note_ids {
-            for pin_id in pinned.iter_mut() {
-                if pin_id.starts_with(&old_prefix) {
-                    *pin_id = format!("{}{}", new_prefix, &pin_id[old_prefix.len()..]);
-                }
-            }
-        }
-        let _ = save_settings(&folder, &settings);
-    }
-
-    // Update cache
-    {
-        let mut cache = state.notes_cache.write().expect("cache write lock");
-        let updates: Vec<(String, String)> = cache
-            .keys()
-            .filter(|id| id.starts_with(&old_prefix))
-            .map(|id| {
-                let new_id = format!("{}{}", new_prefix, &id[old_prefix.len()..]);
-                (id.clone(), new_id)
-            })
-            .collect();
-        for (old_id, new_id) in updates {
-            if let Some(mut meta) = cache.remove(&old_id) {
-                meta.id = new_id.clone();
-                cache.insert(new_id, meta);
-            }
-        }
-    }
-
-    relink_and_reindex(&state, &folder_root, vec![(path, new_path)]).await;
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -2852,18 +2620,26 @@ async fn export_folder_zip(
     .map_err(|e| format!("Failed to export zip: {e}"))
 }
 
-/// Zips the note `id`, whose current content is `markdown`, with its assets.
+/// Zips the note `id`, whose current content is `markdown`, with its
+/// sub-pages and their assets, without private pages unless `include_private`.
 #[tauri::command]
 async fn export_note_zip(
     id: String,
     markdown: String,
     dest: String,
+    include_private: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let root = PathBuf::from(notes_folder(&state)?);
     abs_path_from_id(&root, &id)?;
+    let ignored = ignored_dirs(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        export::export_note(&root, &id, &markdown, Path::new(&dest))
+        let private = if include_private {
+            vault::PrivateSet::default()
+        } else {
+            vault::current_private_set(&root, &ignored)?
+        };
+        export::export_note(&root, &id, &markdown, &ignored, &private, Path::new(&dest))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2885,14 +2661,13 @@ struct NotionImportProgress {
     total: usize,
 }
 
-/// Imports Notion HTML export zips (the parts of one export) into `folder`,
-/// or into a new `Notion Import` folder. Emits `notion-import-progress` after
+/// Imports Notion HTML export zips (the parts of one export) into the notes
+/// folder, top-level pages at its root. Emits `notion-import-progress` after
 /// each note it writes.
 #[tauri::command]
 async fn import_notion(
     app: AppHandle,
     paths: Vec<String>,
-    folder: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<notion_import::Summary, String> {
     let root = PathBuf::from(notes_folder(&state)?);
@@ -2900,7 +2675,7 @@ async fn import_notion(
     let ignored = ignored_dirs(&state);
     let summary = tauri::async_runtime::spawn_blocking(move || {
         let zips: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        notion_import::import(&notes_root, &zips, folder.as_deref(), &ignored, |current, total| {
+        notion_import::import(&notes_root, &zips, &ignored, |current, total| {
             let _ = app.emit("notion-import-progress", NotionImportProgress { current, total });
         })
     })
@@ -3096,6 +2871,12 @@ async fn vault_set_private(
     state: State<'_, AppState>,
 ) -> Result<vault::VaultStatus, String> {
     with_vault(&state, move |root, ignored, store| {
+        // Before the marks, so the exclude block lists the new files
+        if is_private {
+            for id in &ids {
+                create_bare_page_file(root, id, ignored)?;
+            }
+        }
         vault::set_private(root, ignored, store, &ids, is_private)?;
         vault::status(root, ignored, store)
     })
@@ -4481,12 +4262,7 @@ pub fn run() {
             delete_note,
             sub_page_counts,
             create_note,
-            list_folders,
-            create_folder,
-            delete_folder,
-            rename_folder,
             move_note,
-            move_folder,
             get_settings,
             update_settings,
             update_git_enabled,
