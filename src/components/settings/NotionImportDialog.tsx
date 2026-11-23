@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useState } from "react";
 import { useNotes } from "../../context/NotesContext";
 import {
   errorMessage,
@@ -15,7 +15,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   Button,
-  Select,
 } from "../ui";
 import { PrivatePagePicker } from "../vault/PrivatePagePicker";
 
@@ -29,40 +28,31 @@ function count(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
-function summaryText({ pages, images, files, folder }: NotionImportSummary) {
-  return `Imported ${count(pages, "page")}, ${count(images, "image")} and ${count(files, "file")} into "${folder}"`;
+function summaryText({ pages, images, files }: NotionImportSummary) {
+  return `Imported ${count(pages, "page")}, ${count(images, "image")} and ${count(files, "file")}`;
 }
 
 interface NotionImportDialogProps {
   /** The zips of the export. */
   paths: string[];
-  /** Existing folders the user can import into. */
-  folders: string[];
   onClose: () => void;
 }
 
 export function NotionImportDialog({
   paths,
-  folders,
   onClose,
 }: NotionImportDialogProps) {
   const { refreshNotes } = useNotes();
-  const destinationId = useId();
-  // "" stands for a new `Notion Import` folder.
-  const [folder, setFolder] = useState("");
   const [status, setStatus] = useState<Status>({ step: "ready" });
   const importing = status.step === "importing";
 
   const handleImport = async () => {
     setStatus({ step: "importing", current: 0, total: 0 });
     try {
-      const summary = await importNotion(
-        paths,
-        folder || null,
-        (current, total) =>
-          setStatus((s) =>
-            s.step === "importing" ? { step: "importing", current, total } : s,
-          ),
+      const summary = await importNotion(paths, (current, total) =>
+        setStatus((s) =>
+          s.step === "importing" ? { step: "importing", current, total } : s,
+        ),
       );
       setStatus({ step: "done", summary });
     } catch (error) {
@@ -100,7 +90,7 @@ export function NotionImportDialog({
 
         {status.step === "private" ? (
           <PrivatePagePicker
-            folder={status.summary.folder}
+            pageIds={status.summary.ids}
             onBack={() => setStatus({ ...status, step: "done" })}
             onDone={onClose}
           />
@@ -133,27 +123,6 @@ export function NotionImportDialog({
                 </li>
               ))}
             </ul>
-            <div className="space-y-1">
-              <label
-                htmlFor={destinationId}
-                className="text-sm font-medium text-text"
-              >
-                Destination
-              </label>
-              <Select
-                id={destinationId}
-                value={folder}
-                onChange={(e) => setFolder(e.target.value)}
-                disabled={importing}
-              >
-                <option value="">New folder: Notion Import</option>
-                {folders.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-              </Select>
-            </div>
             {status.step === "importing" && (
               <output className="block text-sm text-text-muted">
                 {status.total === 0

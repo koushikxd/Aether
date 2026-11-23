@@ -35,9 +35,17 @@ async function exportZip(
   });
 }
 
-/** The note as markdown with the files in `assets/` it uses, in one zip. */
-export function exportNoteZip(id: string, markdown: string, title: string) {
-  return exportZip(title, "export_note_zip", { id, markdown });
+/**
+ * The note as markdown with its sub-pages and the files in `assets/` they
+ * use, in one zip. Private pages are left out unless `includePrivate`.
+ */
+export function exportNoteZip(
+  id: string,
+  markdown: string,
+  title: string,
+  includePrivate: boolean,
+) {
+  return exportZip(title, "export_note_zip", { id, markdown, includePrivate });
 }
 
 /**
@@ -72,7 +80,8 @@ export async function importZip(): Promise<boolean> {
 }
 
 export interface NotionImportSummary {
-  folder: string;
+  /** Ids of the notes written. */
+  ids: string[];
   pages: number;
   images: number;
   files: number;
@@ -85,12 +94,11 @@ export function pickNotionZips(): Promise<string[] | null> {
 }
 
 /**
- * Imports a Notion HTML export (every zip part of it) into `folder`, or into
- * a new `Notion Import` folder when null.
+ * Imports a Notion HTML export (every zip part of it), with its top-level
+ * pages at the root of the notes folder.
  */
 export async function importNotion(
   paths: string[],
-  folder: string | null,
   onProgress: (current: number, total: number) => void,
 ): Promise<NotionImportSummary> {
   const unlisten = await listen<{ current: number; total: number }>(
@@ -98,10 +106,7 @@ export async function importNotion(
     ({ payload }) => onProgress(payload.current, payload.total),
   );
   try {
-    return await invoke<NotionImportSummary>("import_notion", {
-      paths,
-      folder,
-    });
+    return await invoke<NotionImportSummary>("import_notion", { paths });
   } finally {
     unlisten();
   }
