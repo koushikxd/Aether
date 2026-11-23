@@ -134,9 +134,11 @@ interface ListItemProps {
   subtitle?: string;
   meta?: string;
   isSelected?: boolean;
+  /** Set in selection mode: whether the row is selected. */
+  pressed?: boolean;
   isPinned?: boolean;
   isPrivate?: boolean;
-  onClick?: () => void;
+  onClick?: (e: React.MouseEvent) => void;
   /** Optional status icon to display next to meta */
 }
 
@@ -145,6 +147,7 @@ export function ListItem({
   subtitle,
   meta,
   isSelected = false,
+  pressed,
   isPinned = false,
   isPrivate = false,
   onClick,
@@ -164,6 +167,7 @@ export function ListItem({
       onContextMenu={onContextMenu}
       // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- a native button changes click focus (WebKit focuses the list container instead, showing its focus ring) and makes Space activate the row
       role="button"
+      aria-pressed={pressed}
       tabIndex={-1}
       className={cn(
         "w-full text-left px-2.5 py-2.25 transition-colors cursor-pointer select-none rounded-md",

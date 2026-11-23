@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Note, NoteMetadata, Settings } from "../types/note";
+import type { Note, NoteInfo, NoteMetadata, Settings } from "../types/note";
 
 export async function getNotesFolder(): Promise<string | null> {
   return invoke("get_notes_folder");
@@ -15,6 +15,10 @@ export async function listNotes(): Promise<NoteMetadata[]> {
 
 export async function readNote(id: string): Promise<Note> {
   return invoke("read_note", { id });
+}
+
+export async function getNoteInfo(id: string): Promise<NoteInfo> {
+  return invoke("get_note_info", { id });
 }
 
 export async function saveNote(
@@ -47,7 +51,7 @@ export async function deleteFolder(path: string): Promise<void> {
 export async function renameFolder(
   oldPath: string,
   newName: string,
-): Promise<void> {
+): Promise<string> {
   return invoke("rename_folder", { oldPath, newName });
 }
 

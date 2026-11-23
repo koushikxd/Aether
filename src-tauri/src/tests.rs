@@ -287,16 +287,18 @@ fn rename_folder_rewrites_links_into_it() {
     notes.write("Projects/Plan.md", "# Plan\n\n[Inbox](../Inbox.md)\n");
     notes.write("Inbox.md", "# Inbox\n\n[Plan](Projects/Plan.md)\n");
 
-    tauri::async_runtime::block_on(crate::rename_folder(
+    let new_path = tauri::async_runtime::block_on(crate::rename_folder(
         "Projects".to_string(),
-        "Work Stuff".to_string(),
+        "Work: Stuff".to_string(),
         notes.state(),
     ))
     .expect("rename_folder");
 
     notes.save_artifact("rename_folder_rewrites_links_into_it");
-    assert_eq!(notes.read("Work Stuff/Plan.md"), "# Plan\n\n[Inbox](../Inbox.md)\n");
-    assert_eq!(notes.read("Inbox.md"), "# Inbox\n\n[Plan](Work%20Stuff/Plan.md)\n");
+    // The name is sanitized on disk, and the path returned is the one on disk
+    assert_eq!(new_path, "Work- Stuff");
+    assert_eq!(notes.read("Work- Stuff/Plan.md"), "# Plan\n\n[Inbox](../Inbox.md)\n");
+    assert_eq!(notes.read("Inbox.md"), "# Inbox\n\n[Plan](Work-%20Stuff/Plan.md)\n");
 }
 
 #[test]
@@ -1767,4 +1769,32 @@ fn rename_and_move_timings_on_2000_notes() {
         !found.is_empty() && found.iter().all(|id| id.starts_with("f1/Hub Renamed/Sub ")),
         "{found:?}"
     );
+}
+
+#[test]
+fn get_note_info_reports_the_file_birth_time_when_the_platform_has_one() {
+    let notes = TestNotes::new();
+    notes.write("Projects/Plan.md", "# Plan\n");
+
+    let info = run(crate::get_note_info(
+        "Projects/Plan".to_string(),
+        notes.state(),
+    ))
+    .expect("get_note_info");
+
+    let expected = std::fs::metadata(notes.root().join("Projects/Plan.md"))
+        .and_then(|m| m.created())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    assert_eq!(info.created, expected);
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(info.created.is_some());
+    }
+    assert!(run(crate::get_note_info("Missing".to_string(), notes.state())).is_err());
+    assert!(run(crate::get_note_info(
+        "../Outside".to_string(),
+        notes.state()
+    ))
+    .is_err());
 }

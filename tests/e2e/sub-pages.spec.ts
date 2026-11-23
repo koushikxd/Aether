@@ -118,6 +118,9 @@ test("the Sub-page slash command creates a sub-page and links to it", async ({
   await expect(app.row("My Page")).toHaveAttribute("aria-expanded", "true");
   await expect(app.row("Untitled")).toBeVisible();
 
+  // The sub-page opens in a new tab; the link in the page leads to that tab
+  await expect(app.editor.locator("h1")).toHaveText("Untitled");
+  await app.row("My Page").click();
   await app.editor.getByRole("link", { name: "Untitled" }).click();
   await expect(app.editor.locator("h1")).toHaveText("Untitled");
   await app.screenshot("sub-page-from-slash-command");

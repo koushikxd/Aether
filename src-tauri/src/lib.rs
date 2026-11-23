@@ -1303,6 +1303,36 @@ async fn read_note(id: String, state: State<'_, AppState>) -> Result<Note, Strin
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteInfo {
+    /// File birth time in Unix seconds, `None` when the platform does not record it.
+    pub created: Option<i64>,
+}
+
+#[tauri::command]
+async fn get_note_info(id: String, state: State<'_, AppState>) -> Result<NoteInfo, String> {
+    let folder = {
+        let app_config = state.app_config.read().expect("app_config read lock");
+        app_config
+            .notes_folder
+            .clone()
+            .ok_or("Notes folder not set")?
+    };
+
+    let file_path = abs_path_from_id(&PathBuf::from(&folder), &id)?;
+    let metadata = fs::metadata(&file_path)
+        .await
+        .map_err(|_| "Note not found".to_string())?;
+
+    let created = metadata
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+
+    Ok(NoteInfo { created })
+}
+
 #[tauri::command]
 async fn save_note(
     id: Option<String>,
@@ -1771,7 +1801,7 @@ async fn rename_folder(
     old_path: String,
     new_name: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let folder = {
         let app_config = state.app_config.read().expect("app_config read lock");
         app_config
@@ -1861,9 +1891,9 @@ async fn rename_folder(
         }
     }
 
-    relink_and_reindex(&state, &folder_root, vec![(old_path, new_path)]).await;
+    relink_and_reindex(&state, &folder_root, vec![(old_path, new_path.clone())]).await;
 
-    Ok(())
+    Ok(new_path)
 }
 
 #[tauri::command]
@@ -4446,6 +4476,7 @@ pub fn run() {
             set_notes_folder,
             list_notes,
             read_note,
+            get_note_info,
             save_note,
             delete_note,
             sub_page_counts,

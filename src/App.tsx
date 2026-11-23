@@ -37,6 +37,7 @@ import * as aiService from "./services/ai";
 import type { AiProvider } from "./services/ai";
 import { isMac, isWindows } from "./lib/platform";
 import { useNoteNavigation } from "./lib/noteNavigation";
+import { TabsProvider, useTabs } from "./context/TabsContext";
 
 // Detect preview mode from URL search params
 function getWindowMode(): {
@@ -69,6 +70,7 @@ function AppContent() {
     createNoteInFolder,
   } = useNotes();
   const navigation = useNoteNavigation();
+  const tabs = useTabs();
   const { interfaceZoom, setInterfaceZoom, reloadSettings } = useTheme();
   const interfaceZoomRef = useRef(interfaceZoom);
   const currentNoteRef = useRef(currentNote);
@@ -78,10 +80,13 @@ function AppContent() {
   }, [interfaceZoom, currentNote]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteView, setPaletteView] = useState<SubView>();
+  // Cmd+T: the note picked in the palette opens in a new tab
+  const [paletteNewTab, setPaletteNewTab] = useState(false);
   // Bumped to remount an open palette in the requested sub-view
   const [paletteKey, setPaletteKey] = useState(0);
-  const openPaletteIn = useCallback((subView: SubView) => {
+  const openPaletteIn = useCallback((subView: SubView, newTab = false) => {
     setPaletteView(subView);
+    setPaletteNewTab(newTab);
     setPaletteKey((k) => k + 1);
     setPaletteOpen(true);
   }, []);
@@ -268,9 +273,51 @@ function AppContent() {
         return;
       }
 
+      const mod = e.metaKey || e.ctrlKey;
+
+      // Cmd+W - Close the tab; the last tab, or Settings, closes the window
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        if (view === "settings" || !tabs.closeActiveTab()) {
+          getCurrentWindow().close().catch(console.error);
+        }
+        return;
+      }
+
       // Block all other shortcuts when in settings view
       if (view === "settings") {
         return;
+      }
+
+      // Tab shortcuts. The command menu keeps Cmd+1-9 for its rows.
+      if (!paletteOpen) {
+        // Ctrl+Tab / Ctrl+Shift+Tab - Next / previous tab
+        if (e.ctrlKey && e.key === "Tab") {
+          e.preventDefault();
+          tabs.cycleTab(e.shiftKey ? -1 : 1);
+          return;
+        }
+
+        // Cmd+1-8 - Go to that tab; Cmd+9 - Go to the last tab
+        if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+          e.preventDefault();
+          tabs.activateIndex(e.key === "9" ? -1 : Number(e.key) - 1);
+          return;
+        }
+
+        // Cmd+Shift+T - Reopen the last closed tab
+        if (mod && e.shiftKey && e.key.toLowerCase() === "t") {
+          e.preventDefault();
+          tabs.reopenClosedTab();
+          return;
+        }
+
+        // Cmd+T - Pick a note to open in a new tab
+        if (mod && !e.shiftKey && e.key.toLowerCase() === "t") {
+          e.preventDefault();
+          openPaletteIn("search", true);
+          return;
+        }
       }
 
       // Cmd+Shift+Enter - Toggle focus mode
@@ -498,6 +545,8 @@ function AppContent() {
     navigation,
     notes,
     openPaletteIn,
+    paletteOpen,
+    tabs,
     reloadCurrentNote,
     selectedNoteId,
     selectNote,
@@ -512,6 +561,7 @@ function AppContent() {
   const handleClosePalette = useCallback(() => {
     setPaletteOpen(false);
     setPaletteView(undefined);
+    setPaletteNewTab(false);
     editorRef.current?.commands.focus();
   }, []);
 
@@ -583,6 +633,7 @@ function AppContent() {
         key={paletteKey}
         open={paletteOpen}
         initialView={paletteView}
+        newTab={paletteNewTab}
         navigation={navigation}
         onClose={handleClosePalette}
         onOpenSettings={toggleSettings}
@@ -712,8 +763,9 @@ function UpdateToast({
 function App() {
   const { isPreview, previewFile } = useMemo(() => getWindowMode(), []);
 
-  // Cmd/Ctrl+W — close window (works in both preview and folder mode)
+  // Cmd/Ctrl+W closes the preview window. Folder mode closes tabs first.
   useEffect(() => {
+    if (!isPreview) return undefined;
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "w") {
         e.preventDefault();
@@ -722,7 +774,7 @@ function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [isPreview]);
 
   // Add platform class for OS-specific styling (e.g., keyboard shortcuts)
   useEffect(() => {
@@ -757,7 +809,9 @@ function App() {
         <NotesProvider>
           <GitProvider>
             <VaultProvider>
-              <AppContent />
+              <TabsProvider>
+                <AppContent />
+              </TabsProvider>
             </VaultProvider>
           </GitProvider>
         </NotesProvider>

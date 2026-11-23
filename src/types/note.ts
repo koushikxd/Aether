@@ -13,6 +13,11 @@ export interface Note {
   modified: number;
 }
 
+export interface NoteInfo {
+  /** File birth time in Unix seconds, null when the platform does not record it. */
+  created: number | null;
+}
+
 export interface ThemeSettings {
   mode: "light" | "dark" | "system";
 }

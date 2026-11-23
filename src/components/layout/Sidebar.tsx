@@ -20,6 +20,8 @@ import { useNotes } from "../../context/NotesContext";
 import { useVault } from "../../context/VaultContext";
 import { NoteList } from "../notes/NoteList";
 import { Footer } from "./Footer";
+import { SelectionBar } from "./SelectionBar";
+import { outermostIds } from "../../lib/folderTree";
 import { Button, IconButton } from "../ui";
 import {
   PlusIcon,
@@ -55,13 +57,16 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const [multiSelectedNoteIds, setMultiSelectedNoteIds] = useState<Set<string>>(
     new Set(),
   );
-  const [lastClickedNoteId, setLastClickedNoteId] = useState<string | null>(
-    null,
-  );
   const multiSelectedRef = useRef<Set<string>>(multiSelectedNoteIds);
   useLayoutEffect(() => {
     multiSelectedRef.current = multiSelectedNoteIds;
   }, [multiSelectedNoteIds]);
+  // Selection mode lasts while anything is selected
+  const selecting = multiSelectedNoteIds.size > 0;
+  const exitSelection = useCallback(
+    () => setMultiSelectedNoteIds(new Set()),
+    [],
+  );
 
   // dnd-kit
   const sensors = useSensors(
@@ -77,14 +82,9 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
         : noteId;
       setDragLabel(leaf);
 
-      // Multi-select: if dragged note is in selection, drag all; otherwise reset
+      // A note in the selection drags the whole selection
       const selected = multiSelectedRef.current;
-      if (selected.has(noteId) && selected.size > 1) {
-        setDragCount(selected.size);
-      } else {
-        setMultiSelectedNoteIds(new Set([noteId]));
-        setDragCount(1);
-      }
+      setDragCount(selected.has(noteId) ? selected.size : 1);
     } else if (data?.type === "folder" && typeof data.path === "string") {
       const path = data.path;
       const name = path.includes("/")
@@ -117,9 +117,9 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           const noteId = activeData.id;
           const selected = multiSelectedRef.current;
 
-          // Batch move if multi-selected
-          if (selected.has(noteId) && selected.size > 1) {
-            const noteIds = Array.from(selected).filter((id) => {
+          if (selected.has(noteId)) {
+            // A page moves its sub-pages along, so only the outermost move
+            const noteIds = outermostIds(selected).filter((id) => {
               const parent = id.includes("/")
                 ? id.substring(0, id.lastIndexOf("/"))
                 : "";
@@ -137,14 +137,13 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
             if (failures > 0) {
               toast.error(`Failed to move ${failures} note(s)`);
             }
-            setMultiSelectedNoteIds(new Set());
+            exitSelection();
           } else {
             const noteParent = noteId.includes("/")
               ? noteId.substring(0, noteId.lastIndexOf("/"))
               : "";
             if (noteParent === targetFolder || isInside(noteId)) return;
             await moveNote(noteId, targetFolder);
-            setMultiSelectedNoteIds(new Set());
           }
         } else if (
           activeData.type === "folder" &&
@@ -170,7 +169,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
         toast.error("Failed to move item");
       }
     },
-    [moveNote, moveFolder],
+    [moveNote, moveFolder, exitSelection],
   );
 
   // Load folders setting
@@ -309,10 +308,12 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           <NoteList
             multiSelectedNoteIds={multiSelectedNoteIds}
             setMultiSelectedNoteIds={setMultiSelectedNoteIds}
-            lastClickedNoteId={lastClickedNoteId}
-            setLastClickedNoteId={setLastClickedNoteId}
           />
         </div>
+
+        {selecting && (
+          <SelectionBar ids={multiSelectedNoteIds} onExit={exitSelection} />
+        )}
 
         {/* Footer with git status, commit, and settings */}
         <Footer onOpenSettings={onOpenSettings} />
