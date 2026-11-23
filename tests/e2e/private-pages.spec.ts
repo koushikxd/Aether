@@ -2,7 +2,6 @@ import { expect, test, type AetherApp } from "./app";
 import type { FakeVaultSeed } from "./fake-vault";
 
 const KEY = "aether-key-c2VjcmV0LWtleS1mb3ItdGVzdHMtb25seS0xMjM0NTY3";
-const FOLDERS = JSON.stringify({ foldersEnabled: true });
 
 /** Gives the fake notes folder a vault; call before `app.seed`. */
 async function seedVault(app: AetherApp, vault: FakeVaultSeed) {
@@ -36,7 +35,7 @@ test("Select private pages: search, parent cascade, and Make private sends the t
   app,
 }) => {
   await seedVault(app, { key: KEY, unlocked: true });
-  await app.seed({ ".aether/settings.json": FOLDERS, "Plan.md": "# Plan\n" });
+  await app.seed({ "Plan.md": "# Plan\n" });
   await openSettings(app);
   await app.pickFile(["/Users/me/Downloads/Export.zip"]);
   await app.page.getByRole("button", { name: "Import from Notion" }).click();
@@ -46,14 +45,27 @@ test("Select private pages: search, parent cascade, and Make private sends the t
   await app.page.evaluate(() =>
     window.aetherFake?.finishNotionImport?.(
       {
-        "Notion Import/Projects.md": "# Projects\n",
-        "Notion Import/Projects/Alpha.md": "# Alpha\n",
-        "Notion Import/Projects/Alpha/Specs.md": "# Specs\n",
-        "Notion Import/Projects/Beta.md": "# Beta\n",
-        "Notion Import/Journal.md": "# Journal\n",
-        "Notion Import/Journal/Monday.md": "# Monday\n",
+        "Projects.md": "# Projects\n",
+        "Projects/Alpha.md": "# Alpha\n",
+        "Projects/Alpha/Specs.md": "# Specs\n",
+        "Projects/Beta.md": "# Beta\n",
+        "Journal.md": "# Journal\n",
+        "Journal/Monday.md": "# Monday\n",
       },
-      { folder: "Notion Import", pages: 6, images: 0, files: 0, skipped: [] },
+      {
+        ids: [
+          "Projects",
+          "Projects/Alpha",
+          "Projects/Alpha/Specs",
+          "Projects/Beta",
+          "Journal",
+          "Journal/Monday",
+        ],
+        pages: 6,
+        images: 0,
+        files: 0,
+        skipped: [],
+      },
     ),
   );
   await dialog.getByRole("button", { name: "Select private pages" }).click();
@@ -90,10 +102,7 @@ test("Select private pages: search, parent cascade, and Make private sends the t
   const [{ args }] = await app.calls("vault_set_private");
   expect(args.isPrivate).toBe(true);
   expect(args.ids).toEqual(
-    expect.arrayContaining([
-      "Notion Import/Projects",
-      "Notion Import/Journal/Monday",
-    ]),
+    expect.arrayContaining(["Projects", "Journal/Monday"]),
   );
   expect(args.ids).toHaveLength(2);
   await expect(dialog).toBeHidden();
@@ -104,7 +113,6 @@ test("sidebar: lock icons, Make private, Make public only on roots with a confir
 }) => {
   await seedVault(app, { key: KEY, unlocked: true, privateRoots: ["Finance"] });
   await app.seed({
-    ".aether/settings.json": FOLDERS,
     "Finance.md": "# Finance\n",
     "Finance/Bank.md": "# Bank\n",
     "Ideas.md": "# Ideas\n",
@@ -149,7 +157,6 @@ test("sidebar: lock icons, Make private, Make public only on roots with a confir
 test("Make private without a key generates one first, then marks the page", async ({
   app,
 }) => {
-  // The flat list (folders off) has the same menu
   await app.seed({ "Ideas.md": "# Ideas\n" });
   const ideas = app.sidebar.getByText("Ideas", { exact: true });
   await ideas.click({ button: "right" });
@@ -216,7 +223,7 @@ test("a sync that brings another device's private pages shows the locked banner"
     arrivesOnPull: true,
     lockedFiles: { "Finance.md": "# Finance\n" },
   });
-  await app.seed({ ".aether/settings.json": FOLDERS, "Ideas.md": "# Ideas\n" });
+  await app.seed({ "Ideas.md": "# Ideas\n" });
 
   const banner = app.sidebar
     .getByRole("status")
@@ -240,7 +247,7 @@ test("a locked device shows one banner, and entering the key unlocks the pages",
       "Finance/Bank.md": "# Bank\n",
     },
   });
-  await app.seed({ ".aether/settings.json": FOLDERS, "Ideas.md": "# Ideas\n" });
+  await app.seed({ "Ideas.md": "# Ideas\n" });
 
   const banner = app.sidebar
     .getByRole("status")
@@ -294,63 +301,5 @@ test("Export Workspace asks whether to include private pages, off by default", a
   ).toEqual([
     { folder: "", includePrivate: false, dest: "/Users/me/Desktop/notes.zip" },
     { folder: "", includePrivate: true, dest: "/Users/me/Desktop/notes.zip" },
-  ]);
-});
-
-test("folder Export as Zip asks only when the folder holds private pages", async ({
-  app,
-}) => {
-  await seedVault(app, {
-    key: KEY,
-    unlocked: true,
-    privateRoots: ["Work/Bank"],
-  });
-  await app.seed({
-    ".aether/settings.json": FOLDERS,
-    "Work/Bank.md": "# Bank\n",
-    "Work/Plan.md": "# Plan\n",
-    "Home/Ideas.md": "# Ideas\n",
-  });
-
-  const dialog = app.page.getByRole("alertdialog");
-  const include = dialog.getByLabel("Include private pages (unencrypted)");
-  const exportFolder = async (name: string) => {
-    await app.row(name).click({ button: "right" });
-    await app.page.getByRole("menuitem", { name: "Export as Zip" }).click();
-  };
-
-  await exportFolder("Home");
-  await expect.poll(() => app.calls("export_folder_zip")).toHaveLength(1);
-  await expect(dialog).toHaveCount(0);
-
-  await exportFolder("Work");
-  await expect(include).not.toBeChecked();
-  await app.screenshot("export-folder-dialog");
-  await dialog.getByRole("button", { name: "Export", exact: true }).click();
-  await expect(dialog).toBeHidden();
-
-  await exportFolder("Work");
-  await include.check();
-  await dialog.getByRole("button", { name: "Export", exact: true }).click();
-
-  await expect.poll(() => app.calls("export_folder_zip")).toHaveLength(3);
-  expect(
-    (await app.calls("export_folder_zip")).map((call) => call.args),
-  ).toEqual([
-    {
-      folder: "Home",
-      includePrivate: false,
-      dest: "/Users/me/Desktop/Home.zip",
-    },
-    {
-      folder: "Work",
-      includePrivate: false,
-      dest: "/Users/me/Desktop/Work.zip",
-    },
-    {
-      folder: "Work",
-      includePrivate: true,
-      dest: "/Users/me/Desktop/Work.zip",
-    },
   ]);
 });

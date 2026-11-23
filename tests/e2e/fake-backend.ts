@@ -104,7 +104,6 @@ const DEFAULT_SETTINGS: Args = {
   customEditorWidthPx: null,
   sidebarWidthPx: null,
   ollamaModel: null,
-  foldersEnabled: null,
   ignoredPatterns: null,
   customColorsLight: null,
   customColorsDark: null,
@@ -115,6 +114,8 @@ const modified = new Map<string, number>();
 const calls: FakeCall[] = [];
 const unhandled: string[] = [];
 let clock = Math.floor(Date.now() / 1000);
+/** When the seeded files were written: older than any save in the test. */
+const seededAt = clock;
 
 function writeFile(path: string, content: string) {
   files[path] = content;
@@ -191,14 +192,46 @@ function sanitizeFilename(title: string): string {
   return cleaned || "Untitled";
 }
 
+function leafName(id: string): string {
+  return id.split("/").pop() ?? id;
+}
+
+// Mirrors bare_page_dir: a visible folder with no page file of its own.
+function isBarePage(id: string): boolean {
+  const leaf = leafName(id);
+  return (
+    !(`${id}.md` in files) &&
+    !leaf.startsWith(".") &&
+    !HIDDEN_DIRS.has(leaf) &&
+    hasFolder(id)
+  );
+}
+
+// bare_page_markdown: what a bare page reads as until its file exists.
+function bareMarkdown(id: string): string {
+  return `# ${leafName(id)}\n`;
+}
+
 function metadata(id: string): NoteMetadata {
   const path = `${id}.md`;
+  if (isBarePage(id)) {
+    // Rust gives the folder's mtime; the newest file under it stands in.
+    const times = Object.keys(files)
+      .filter((p) => p.startsWith(`${id}/`))
+      .map((p) => modified.get(p) ?? seededAt);
+    return {
+      id,
+      title: leafName(id),
+      preview: "",
+      modified: Math.max(...times),
+    };
+  }
   const content = files[path];
   return {
     id,
     title: extractTitle(content),
     preview: generatePreview(content),
-    modified: modified.get(path) ?? clock,
+    modified: modified.get(path) ?? seededAt,
   };
 }
 
@@ -206,9 +239,14 @@ function note(id: string): Note {
   const path = `${id}.md`;
   return {
     ...metadata(id),
-    content: files[path],
+    content: files[path] ?? bareMarkdown(id),
     path: `${NOTES_ROOT}/${path}`,
   };
+}
+
+// Mirrors create_bare_page_file, for actions that need the page's file.
+function createBarePageFile(id: string) {
+  if (isBarePage(id)) writeFile(`${id}.md`, bareMarkdown(id));
 }
 
 function readSettings(): Args {
@@ -377,48 +415,6 @@ function relink(moves: Move[]) {
   }
 }
 
-// Mirrors move_folder: the folder keeps its name under the new parent.
-function moveFolder(args: Args): Promise<null> | null {
-  const path = str(args, "path");
-  const parent = str(args, "targetParent");
-  const name = path.split("/").pop() ?? path;
-  const dest = parent ? `${parent}/${name}` : name;
-  if (!hasFolder(path)) return Promise.reject("Source is not a directory");
-  if (dest === path || dest.startsWith(`${path}/`)) {
-    return Promise.reject("Cannot move a folder into itself");
-  }
-  if (hasFolder(dest)) {
-    return Promise.reject(
-      "A folder with that name already exists in the target",
-    );
-  }
-  const moves: Move[] = [[path, dest]];
-  moveFiles(path, dest);
-  followPins(moves);
-  relink(moves);
-  return null;
-}
-
-// Mirrors rename_folder: the name is sanitized like Rust's; returns the new path.
-function renameFolder(args: Args): Promise<string> | string {
-  const path = str(args, "oldPath");
-  const name = str(args, "newName")
-    .replace(/[/\\:*?"<>|]/g, "-")
-    .trim();
-  if (!name) return Promise.reject("Folder name cannot be empty");
-  if (!hasFolder(path)) return Promise.reject("Path is not a directory");
-  const slash = path.lastIndexOf("/");
-  const dest = slash >= 0 ? `${path.slice(0, slash)}/${name}` : name;
-  if (hasFolder(dest)) {
-    return Promise.reject("A folder with that name already exists");
-  }
-  const moves: Move[] = [[path, dest]];
-  moveFiles(path, dest);
-  followPins(moves);
-  relink(moves);
-  return dest;
-}
-
 // Folders exist only through the files in them, so an emptied sub-page
 // folder disappears on its own (Rust removes it explicitly).
 function hasFolder(path: string): boolean {
@@ -431,7 +427,7 @@ function moveFiles(from: string, to: string) {
     const next = relocate(path, from, to);
     if (next === null) continue;
     files[next] = files[path];
-    modified.set(next, modified.get(path) ?? clock);
+    modified.set(next, modified.get(path) ?? seededAt);
     delete files[path];
   }
 }
@@ -460,7 +456,9 @@ function moveNote(args: Args): Promise<string> | string {
   const target = str(args, "targetFolder");
   const leaf = id.split("/").pop() ?? id;
   const newId = target ? `${target}/${leaf}` : leaf;
-  if (!(`${id}.md` in files)) return Promise.reject("Note not found");
+  if (!(`${id}.md` in files) && !isBarePage(id)) {
+    return Promise.reject("Note not found");
+  }
   if (newId === id) return id;
   if (target === id || target.startsWith(`${id}/`)) {
     return Promise.reject("Cannot move a page into its own sub-pages");
@@ -471,6 +469,7 @@ function moveNote(args: Args): Promise<string> | string {
       "A note with that name already exists in the target folder",
     );
   }
+  createBarePageFile(id);
   const moves: Move[] = [[`${id}.md`, `${newId}.md`]];
   if (subPages) moves.push([id, newId]);
   moves.forEach(([from, to]) => moveFiles(from, to));
@@ -594,9 +593,19 @@ const handlers: Record<string, Handler> = {
   list_notes: () => {
     const ids = readSettings().pinnedNoteIds;
     const pinned = new Set<unknown>(Array.isArray(ids) ? ids : []);
-    const notes = Object.keys(files)
-      .filter(isNoteFile)
-      .map((path) => metadata(path.slice(0, -3)));
+    const folders = new Set<string>();
+    for (const path of Object.keys(files)) {
+      const dirs = parentDir(path);
+      const hidden = dirs.findIndex((d) => HIDDEN_DIRS.has(d));
+      const visible = hidden < 0 ? dirs : dirs.slice(0, hidden);
+      visible.forEach((_, i) => folders.add(visible.slice(0, i + 1).join("/")));
+    }
+    const notes = [
+      ...Object.keys(files)
+        .filter(isNoteFile)
+        .map((path) => path.slice(0, -3)),
+      ...[...folders].filter(isBarePage),
+    ].map(metadata);
     notes.sort(
       (a, b) =>
         Number(pinned.has(b.id)) - Number(pinned.has(a.id)) ||
@@ -606,12 +615,16 @@ const handlers: Record<string, Handler> = {
   },
   read_note: (args) => {
     const id = str(args, "id");
-    if (!(`${id}.md` in files)) return Promise.reject("Note not found");
+    if (!(`${id}.md` in files) && !isBarePage(id)) {
+      return Promise.reject("Note not found");
+    }
     return note(id);
   },
   get_note_info: (args) => {
     const id = str(args, "id");
-    if (!(`${id}.md` in files)) return Promise.reject("Note not found");
+    if (!(`${id}.md` in files) && !isBarePage(id)) {
+      return Promise.reject("Note not found");
+    }
     return { created: fake.noteCreated };
   },
   save_note: saveNote,
@@ -620,21 +633,6 @@ const handlers: Record<string, Handler> = {
   delete_note: deleteNote,
   sub_page_counts: subPageCounts,
   move_note: moveNote,
-  move_folder: moveFolder,
-  rename_folder: renameFolder,
-  // Folders that hold any file, outside the hidden ones (Rust also lists empty folders).
-  list_folders: () => {
-    const folders = new Set<string>();
-    for (const path of Object.keys(files)) {
-      const dirs = parentDir(path);
-      const hidden = dirs.findIndex((d) => HIDDEN_DIRS.has(d));
-      const visible = hidden < 0 ? dirs : dirs.slice(0, hidden);
-      visible.forEach((_, i) => folders.add(visible.slice(0, i + 1).join("/")));
-    }
-    const sorted = [...folders];
-    sorted.sort();
-    return sorted;
-  },
   get_settings: readSettings,
   update_settings: (args) => {
     writeFile(SETTINGS_PATH, JSON.stringify(args.newSettings, null, 2));
@@ -697,8 +695,8 @@ const handlers: Record<string, Handler> = {
   "plugin:updater|check": () => null,
   // Cmd+W on the last tab; the call log is the record.
   "plugin:window|close": () => null,
-  ...vaultHandlers({ files, writeFile }),
-  ...mergeHandlers({ files, writeFile }),
+  ...vaultHandlers({ files, writeFile, createBarePageFile }),
+  ...mergeHandlers({ files, writeFile, createBarePageFile }),
 };
 
 mockWindows("main");

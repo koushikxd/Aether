@@ -1,7 +1,6 @@
 import { expect, test, type AetherApp } from "./app";
 
 const SETTINGS = ".aether/settings.json";
-const FOLDERS_ON = JSON.stringify({ foldersEnabled: true });
 
 function toggle(app: AetherApp, name: string) {
   return app.row(name).locator("[data-sub-pages-toggle]");
@@ -26,16 +25,14 @@ function pinnedIds(settings: string | undefined): unknown {
   return JSON.parse(settings ?? "{}").pinnedNoteIds;
 }
 
-test("a page and its folder show as one item that opens the page", async ({
+test("a page and its sub-page folder show as one item that opens the page", async ({
   app,
 }) => {
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "Page.md": "# Page\n\nThe page body.\n",
     "Page/Child.md": "# Child\n",
     "Page/Nested.md": "# Nested\n",
     "Page/Nested/Deep.md": "# Deep\n",
-    "Folder/Note.md": "# Note\n",
     "Lonely.md": "# Lonely\n",
   });
 
@@ -44,9 +41,7 @@ test("a page and its folder show as one item that opens the page", async ({
   await expect(app.row("Nested")).toHaveAttribute("aria-expanded", "true");
   expect(await left(app, "Child")).toBeGreaterThan(await left(app, "Page"));
   expect(await left(app, "Deep")).toBeGreaterThan(await left(app, "Nested"));
-  await expect(app.row("Folder")).not.toHaveAttribute("aria-expanded");
   await expect(app.row("Lonely")).not.toHaveAttribute("aria-expanded");
-  await expect(app.row("Note")).toBeVisible();
 
   await app.row("Page").click();
   await expect(app.editor).toContainText("The page body.");
@@ -62,7 +57,6 @@ test("New sub-page in the context menu creates and opens a nested note", async (
   app,
 }) => {
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "Page.md": "# Page\n",
     "Other.md": "# Other\n",
   });
@@ -81,7 +75,7 @@ test("New sub-page in the context menu creates and opens a nested note", async (
 test("New sub-page on a page named like a hidden folder explains why it can't", async ({
   app,
 }) => {
-  await app.seed({ [SETTINGS]: FOLDERS_ON, "build.md": "# build\n" });
+  await app.seed({ "build.md": "# build\n" });
 
   await app.row("build").click({ button: "right" });
   await app.page.getByRole("menuitem", { name: "New sub-page" }).click();
@@ -99,7 +93,6 @@ test("the Sub-page slash command creates a sub-page and links to it", async ({
   app,
 }) => {
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "a/My Page.md": "# My Page\n\nIntro\n",
   });
   await app.open("a/My Page");
@@ -131,7 +124,6 @@ test("renaming a page through its title moves its sub-pages", async ({
 }) => {
   await app.seed({
     [SETTINGS]: JSON.stringify({
-      foldersEnabled: true,
       pinnedNoteIds: ["Page/Child"],
     }),
     "Page.md": "# Page\n\nBody\n",
@@ -168,7 +160,6 @@ test("opening a sub-page right after renaming its page follows the rename", asyn
   app,
 }) => {
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "Page.md": "# Page\n",
     "Page/Child.md": "# Child\n\nChild body\n",
   });
@@ -201,7 +192,6 @@ test("deleting a page asks first, counting what goes, then deletes it all", asyn
 }) => {
   await app.seed({
     [SETTINGS]: JSON.stringify({
-      foldersEnabled: true,
       pinnedNoteIds: ["Page/A", "Keep"],
     }),
     "Page.md": "# Page\n",
@@ -233,7 +223,6 @@ test("Delete stays disabled until the sub-pages are counted", async ({
   app,
 }) => {
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "Page.md": "# Page\n",
     "Page/A.md": "# A\n",
   });
@@ -255,9 +244,9 @@ test("dragging moves a page with its sub-pages, and dropping on a note nests it"
   app,
 }) => {
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "Page.md": "# Page\n",
     "Page/Child.md": "# Child\n\n[Up](../Page.md)\n",
+    "Archive.md": "# Archive\n",
     "Archive/Old.md": "# Old\n",
     "Loose.md": "# Loose\n",
   });
@@ -267,6 +256,7 @@ test("dragging moves a page with its sub-pages, and dropping on a note nests it"
     .poll(() => fileList(app))
     .toEqual([
       SETTINGS,
+      "Archive.md",
       "Archive/Old.md",
       "Archive/Page.md",
       "Archive/Page/Child.md",

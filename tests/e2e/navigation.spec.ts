@@ -1,11 +1,6 @@
 import { expect, test, type AetherApp } from "./app";
 
-const SETTINGS = ".aether/settings.json";
-// The folder tree labels each sidebar row with just its title
-const FOLDERS_ON = JSON.stringify({ foldersEnabled: true });
-
 const NOTES = {
-  [SETTINGS]: FOLDERS_ON,
   "Alpha.md": "# Alpha\n\nAlpha body.\n",
   "Beta.md": "# Beta\n\nBeta body.\n",
   "Gamma.md": "# Gamma\n\nGamma body.\n",
@@ -124,7 +119,6 @@ test("Cmd+Shift+N creates and opens a sub-page of the open note", async ({
   app,
 }) => {
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "Page.md": "# Page\n\nPage body.\n",
   });
 
@@ -154,7 +148,6 @@ test("Cmd+Alt+Up opens the parent page", async ({ app }) => {
   // Seeded files share a modified time, so the sidebar keeps this order:
   // Sibling sits between Page and Child
   await app.seed({
-    [SETTINGS]: FOLDERS_ON,
     "Page.md": "# Page\n\nPage body.\n",
     "Page/Sibling.md": "# Sibling\n\nSibling body.\n",
     "Page/Child.md": "# Child\n\nChild body.\n",

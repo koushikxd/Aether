@@ -1,11 +1,6 @@
 import { expect, test, type AetherApp } from "./app";
 
-const SETTINGS = ".aether/settings.json";
-// The folder tree labels each sidebar row with just its title
-const FOLDERS_ON = JSON.stringify({ foldersEnabled: true });
-
 const NOTES = {
-  [SETTINGS]: FOLDERS_ON,
   "Alpha.md": "# Alpha\n\nAlpha body.\n",
   "Beta.md": "# Beta\n\nBeta body.\n",
   "Gamma.md": "# Gamma\n\nGamma body.\n",
@@ -154,7 +149,8 @@ test.describe("tab state", () => {
   test("a moved page's tab follows it", async ({ app }) => {
     await app.seed({
       ...NOTES,
-      "Folder/Inside.md": "# Inside\n\nInside body.\n",
+      "Box.md": "# Box\n",
+      "Box/Inside.md": "# Inside\n\nInside body.\n",
     });
     await openFromSidebar(app, "Alpha");
     await newTabFromPalette(app, "Beta");
@@ -162,33 +158,11 @@ test.describe("tab state", () => {
     await app.page.evaluate(() => {
       if (window.aetherFake) window.aetherFake.moveLag = 200;
     });
-    await app.drag("Alpha", "Folder");
-    await expect.poll(() => app.file("Folder/Alpha.md")).toBeDefined();
+    await app.drag("Alpha", "Box");
+    await expect.poll(() => app.file("Box/Alpha.md")).toBeDefined();
     // A key, not a click: dnd-kit swallows clicks for 50ms after a drag
     await app.page.keyboard.press("ControlOrMeta+1");
     await expectTabs(app, ["Alpha", "Beta"], "Alpha");
-  });
-
-  test("a renamed folder's tabs follow the name the disk got", async ({
-    app,
-  }) => {
-    await app.seed({
-      ...NOTES,
-      "Plans/Inside.md": "# Inside\n\nInside body.\n",
-    });
-    await app.open("Plans/Inside");
-    await expect(app.editor).toContainText("Inside body.");
-    await newTabFromPalette(app, "Alpha");
-    await app.row("Plans").click({ button: "right" });
-    await app.page.getByRole("menuitem", { name: "Rename" }).click();
-    const input = app.page
-      .getByRole("alertdialog", { name: "Rename Folder" })
-      .getByRole("textbox");
-    await input.fill("Q1: Plans");
-    await input.press("Enter");
-    await expect.poll(() => app.file("Q1- Plans/Inside.md")).toBeDefined();
-    await app.page.keyboard.press("ControlOrMeta+1");
-    await expectTabs(app, ["Inside", "Alpha"], "Inside");
   });
 
   test("switching tabs restores the scroll position", async ({ app }) => {
@@ -321,12 +295,11 @@ test.describe("tab strip", () => {
     app,
   }) => {
     const names = Array.from({ length: 12 }, (_, i) => `Note ${i + 1}`);
-    await app.seed({
-      [SETTINGS]: FOLDERS_ON,
-      ...Object.fromEntries(
+    await app.seed(
+      Object.fromEntries(
         names.map((n) => [`${n}.md`, `# ${n}\n\n${n} body.\n`]),
       ),
-    });
+    );
     await openFromSidebar(app, names[0]);
     for (const name of names.slice(1)) await newTabFromPalette(app, name);
     await expect(strip(app).getByRole("tab")).toHaveCount(12);
@@ -430,17 +403,6 @@ test.describe("opening in a new tab", () => {
     await expectTabs(app, ["Alpha", "Beta"], "Beta");
   });
 
-  test("Cmd+click on the flat list opens it in a new tab", async ({ app }) => {
-    const { [SETTINGS]: _, ...flat } = NOTES;
-    await app.seed(flat);
-    await app.sidebar.getByText("Alpha", { exact: true }).click();
-    await expect(app.editor).toContainText("Alpha body.");
-    await app.sidebar
-      .getByText("Beta", { exact: true })
-      .click({ modifiers: ["ControlOrMeta"] });
-    await expectTabs(app, ["Alpha", "Beta"], "Beta");
-  });
-
   test("Cmd+click on a note link or wikilink opens it in a new tab", async ({
     app,
   }) => {
@@ -469,11 +431,12 @@ test.describe("opening in a new tab", () => {
   }) => {
     await app.seed({
       ...NOTES,
-      "Folder/Inside.md": "# Inside\n\nInside body.\n",
+      "Box.md": "# Box\n",
+      "Box/Inside.md": "# Inside\n\nInside body.\n",
     });
     await openFromSidebar(app, "Alpha");
     await app.hold("move_note");
-    await app.drag("Gamma", "Folder");
+    await app.drag("Gamma", "Box");
     await app.page.keyboard.press("ControlOrMeta+k");
     await menu(app).getByRole("textbox").fill("Duplicate Current Note");
     await app.page.keyboard.press("Enter");

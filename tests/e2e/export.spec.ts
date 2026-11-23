@@ -1,4 +1,5 @@
 import { expect, test, type AetherApp } from "./app";
+import type { FakeVaultSeed } from "./fake-vault";
 
 const NOTE = "Work/Projects/Plan";
 // An 8x8 red PNG, stored the way the fake keeps files: one char per byte.
@@ -83,6 +84,7 @@ test("note menu exports a markdown zip of the note through the backend", async (
   const [{ args }] = await app.calls("export_note_zip");
   expect(args.id).toBe(NOTE);
   expect(args.dest).toBe("/Users/me/Desktop/Plan.zip");
+  expect(args.includePrivate).toBe(false);
   expect(args.markdown).toContain("![Chart](../../assets/chart.svg)");
   expect(args.markdown).toContain("[spec.pdf](../../assets/spec.pdf)");
   expect(args.markdown).not.toContain("asset://");
@@ -252,27 +254,65 @@ test("print shows relative images and the new blocks", async ({ app }) => {
   await app.screenshot("print-media");
 });
 
-test("folder menu and settings export zips and import one", async ({ app }) => {
+test("page Export Zip asks about private pages only when the page or a sub-page is private", async ({
+  app,
+}) => {
+  const vault: FakeVaultSeed = {
+    key: "aether-key-c2VjcmV0LWtleS1mb3ItdGVzdHMtb25seS0xMjM0NTY3",
+    unlocked: true,
+    privateRoots: ["Plan/Bank"],
+  };
+  await app.page.addInitScript((seed) => {
+    window.aetherFakeVault = seed;
+  }, vault);
   await app.seed({
-    ".aether/settings.json": JSON.stringify({ foldersEnabled: true }),
-    "Work/Projects/Plan.md": "# Plan\n",
-    "Home.md": "# Home\n",
+    "Plan.md": "# Plan\n\nPlan body.",
+    "Plan/Bank.md": "# Bank\n",
+    "Ideas.md": "# Ideas\n\nIdeas body.",
   });
+  const dialog = app.page.getByRole("alertdialog");
+  const include = dialog.getByLabel("Include private pages (unencrypted)");
 
-  await app.row("Work").click({ button: "right" });
-  await app.page.getByRole("menuitem", { name: "Export as Zip" }).click();
+  await app.open("Ideas");
+  await expect(app.editor).toContainText("Ideas body.");
+  await exportMenu(app, "Export Zip");
+  await expect.poll(() => app.calls("export_note_zip")).toHaveLength(1);
+  await expect(dialog).toHaveCount(0);
 
-  await expect.poll(() => app.calls("export_folder_zip")).toHaveLength(1);
-  expect((await app.calls("export_folder_zip"))[0].args).toEqual({
-    folder: "Work",
-    includePrivate: false,
-    dest: "/Users/me/Desktop/Work.zip",
-  });
+  await app.open("Plan");
+  await expect(app.editor).toContainText("Plan body.");
+  await exportMenu(app, "Export Zip");
+  await expect(dialog).toContainText("Export Plan");
+  await expect(include).not.toBeChecked();
+  await app.screenshot("export-page-dialog");
+  await dialog.getByRole("button", { name: "Export", exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await exportMenu(app, "Export Zip");
+  await include.check();
+  await dialog.getByRole("button", { name: "Export", exact: true }).click();
+
+  await expect.poll(() => app.calls("export_note_zip")).toHaveLength(3);
+  expect(
+    (await app.calls("export_note_zip")).map(({ args }) => [
+      args.id,
+      args.includePrivate,
+      args.dest,
+    ]),
+  ).toEqual([
+    ["Ideas", false, "/Users/me/Desktop/Ideas.zip"],
+    ["Plan", false, "/Users/me/Desktop/Plan.zip"],
+    ["Plan", true, "/Users/me/Desktop/Plan.zip"],
+  ]);
+});
+
+test("settings export the workspace zip and import one", async ({ app }) => {
+  await app.seed({ "Home.md": "# Home\n" });
 
   await app.page.getByRole("button", { name: /^Settings/ }).click();
   await app.page.getByRole("button", { name: "Export Workspace" }).click();
-  await expect.poll(() => app.calls("export_folder_zip")).toHaveLength(2);
-  expect((await app.calls("export_folder_zip"))[1].args).toEqual({
+  await expect.poll(() => app.calls("export_folder_zip")).toHaveLength(1);
+  expect((await app.calls("export_folder_zip"))[0].args).toEqual({
     folder: "",
     includePrivate: false,
     dest: "/Users/me/Desktop/notes.zip",
@@ -287,4 +327,65 @@ test("folder menu and settings export zips and import one", async ({ app }) => {
     ]);
   await expect(app.page.getByText("Imported 3 files")).toBeVisible();
   await app.screenshot("settings-export-import");
+});
+
+test("page Export Zip of a private page warns, then exports it with its sub-pages", async ({
+  app,
+}) => {
+  const vault: FakeVaultSeed = {
+    key: "aether-key-c2VjcmV0LWtleS1mb3ItdGVzdHMtb25seS0xMjM0NTY3",
+    unlocked: true,
+    privateRoots: ["Bank"],
+  };
+  await app.page.addInitScript((seed) => {
+    window.aetherFakeVault = seed;
+  }, vault);
+  await app.seed({
+    "Bank.md": "# Bank\n\nBank body.",
+    "Bank/Loans.md": "# Loans\n",
+  });
+  const dialog = app.page.getByRole("alertdialog");
+
+  await app.open("Bank");
+  await expect(app.editor).toContainText("Bank body.");
+  await exportMenu(app, "Export Zip");
+  await expect(dialog).toContainText("This is a private page.");
+  await expect(
+    dialog.getByLabel("Include private pages (unencrypted)"),
+  ).toHaveCount(0);
+  await app.screenshot("export-private-page-warning");
+  await dialog.getByRole("button", { name: "Export", exact: true }).click();
+
+  await expect.poll(() => app.calls("export_note_zip")).toHaveLength(1);
+  const [{ args }] = await app.calls("export_note_zip");
+  expect([args.id, args.includePrivate]).toEqual(["Bank", true]);
+});
+
+test("page Export Zip of a bare page inside a private page warns too", async ({
+  app,
+}) => {
+  const vault: FakeVaultSeed = {
+    key: "aether-key-c2VjcmV0LWtleS1mb3ItdGVzdHMtb25seS0xMjM0NTY3",
+    unlocked: true,
+    privateRoots: ["Bank"],
+  };
+  await app.page.addInitScript((seed) => {
+    window.aetherFakeVault = seed;
+  }, vault);
+  await app.seed({
+    "Bank.md": "# Bank\n",
+    "Bank/Old/Statement.md": "# Statement\n",
+  });
+  const dialog = app.page.getByRole("alertdialog");
+
+  await app.open("Bank/Old");
+  await expect(app.editor).toContainText("Old");
+  await exportMenu(app, "Export Zip");
+  await expect(dialog).toContainText("This is a private page.");
+  await app.screenshot("export-private-bare-page-warning");
+  await dialog.getByRole("button", { name: "Export", exact: true }).click();
+
+  await expect.poll(() => app.calls("export_note_zip")).toHaveLength(1);
+  const [{ args }] = await app.calls("export_note_zip");
+  expect([args.id, args.includePrivate]).toEqual(["Bank/Old", true]);
 });

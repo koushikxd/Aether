@@ -7,6 +7,7 @@ type Handler = (args: Args) => unknown;
 export interface FakeContext {
   files: FakeFiles;
   writeFile: (path: string, content: string) => void;
+  createBarePageFile: (id: string) => void;
 }
 
 /** A notes folder with a vault, set as `window.aetherFakeVault` before boot. */
@@ -105,6 +106,7 @@ export function vaultHandlers(ctx: FakeContext): Record<string, Handler> {
     vault_set_private: (args) => {
       if (!unlocked) return Promise.reject("Generate or enter a key first");
       const ids = Array.isArray(args.ids) ? args.ids.map(String) : [];
+      if (args.isPrivate) ids.forEach(ctx.createBarePageFile);
       roots = args.isPrivate
         ? [...new Set([...roots, ...ids])]
         : roots.filter((root) => !ids.includes(root));

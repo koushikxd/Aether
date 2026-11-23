@@ -63,9 +63,11 @@ export class AetherApp {
     await expect(this.sidebar).toBeVisible();
   }
 
-  /** A sidebar row (note, page, or folder) by its exact label. */
+  /** A page's row in the sidebar tree (not its Pinned copy) by its exact label. */
   row(name: string): Locator {
-    return this.sidebar.getByRole("button", { name, exact: true });
+    return this.sidebar
+      .locator("[data-page-tree]")
+      .getByRole("button", { name, exact: true });
   }
 
   /** Drags a sidebar row onto another with the pointer, as dnd-kit expects. */
