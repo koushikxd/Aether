@@ -2293,15 +2293,15 @@ export function Editor({
             <div
               // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- tinted via CSS mask with backgroundColor, which an <img> cannot render
               role="img"
-              aria-label="Note"
+              aria-label="Notepad on a stack of books"
               className="w-42 aspect-square mx-auto mb-1"
               style={{
                 backgroundColor: "var(--color-text)",
-                WebkitMaskImage: "url(/note-dark.png)",
+                WebkitMaskImage: "url(/notepad-on-books.svg)",
                 WebkitMaskSize: "contain",
                 WebkitMaskRepeat: "no-repeat",
                 WebkitMaskPosition: "center",
-                maskImage: "url(/note-dark.png)",
+                maskImage: "url(/notepad-on-books.svg)",
                 maskSize: "contain",
                 maskRepeat: "no-repeat",
                 maskPosition: "center",

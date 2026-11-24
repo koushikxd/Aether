@@ -34,18 +34,18 @@ export function FolderPicker() {
       <div className="flex-1 flex items-center justify-center">
         <div className="text-center p-8 max-w-lg select-none">
           <div
-            // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- the PNG is used as a CSS mask so it can be tinted with the theme text color, which an <img> cannot do
+            // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- the SVG is used as a CSS mask so it can be tinted with the theme text color, which an <img> cannot do
             role="img"
-            aria-label="Folders"
+            aria-label="Stack of books"
             className="w-48 aspect-square mx-auto mb-2 opacity-40 animate-fade-in-up"
             style={{
               animationDelay: "0ms",
               backgroundColor: "var(--color-text)",
-              WebkitMaskImage: "url(/folders-dark.png)",
+              WebkitMaskImage: "url(/books-stack.svg)",
               WebkitMaskSize: "contain",
               WebkitMaskRepeat: "no-repeat",
               WebkitMaskPosition: "center",
-              maskImage: "url(/folders-dark.png)",
+              maskImage: "url(/books-stack.svg)",
               maskSize: "contain",
               maskRepeat: "no-repeat",
               maskPosition: "center",
