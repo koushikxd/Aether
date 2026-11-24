@@ -429,10 +429,10 @@ export function AppearanceSettingsSection() {
               style={{
                 fontFamily:
                   editorFontSettings.baseFontFamily === "system-sans"
-                    ? "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+                    ? "'Geist Variable', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
                     : editorFontSettings.baseFontFamily === "serif"
                       ? "ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif"
-                      : "ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace",
+                      : "'Geist Mono Variable', ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace",
                 fontSize: `${editorFontSettings.baseFontSize}px`,
               }}
             >

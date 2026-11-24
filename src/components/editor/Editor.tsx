@@ -2590,8 +2590,7 @@ export function Editor({
                 className="w-full h-full bg-transparent text-text focus:outline-none resize-none px-6 pt-8 pb-24 mx-auto block"
                 style={{
                   maxWidth: "var(--editor-max-width, 48rem)",
-                  fontFamily:
-                    "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
+                  fontFamily: "var(--font-mono)",
                   fontSize: "0.875em",
                   lineHeight: "var(--editor-line-height)",
                   tabSize: 2,

@@ -24,10 +24,10 @@ type ThemeMode = "light" | "dark" | "system";
 // Font family CSS values
 const fontFamilyMap: Record<FontFamily, string> = {
   "system-sans":
-    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+    '"Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
   serif: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif',
   monospace:
-    "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
+    "'Geist Mono Variable', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
 };
 
 // Editor width CSS values for presets
