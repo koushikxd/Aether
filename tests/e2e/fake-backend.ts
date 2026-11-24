@@ -43,6 +43,8 @@ declare global {
     aetherFake?: FakeBackend;
     /** Use Windows display URLs (`http://asset.localhost/...`), which a test can serve. */
     aetherFakeWindowsUrls?: boolean;
+    /** No notes folder chosen yet, as on first launch. */
+    aetherFakeNoFolder?: boolean;
   }
 }
 
@@ -588,7 +590,7 @@ const fake: FakeBackend = {
 };
 
 const handlers: Record<string, Handler> = {
-  get_notes_folder: () => NOTES_ROOT,
+  get_notes_folder: () => (window.aetherFakeNoFolder ? null : NOTES_ROOT),
   start_file_watcher: () => null,
   list_notes: () => {
     const ids = readSettings().pinnedNoteIds;

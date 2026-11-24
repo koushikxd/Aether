@@ -56,6 +56,16 @@ export class AetherApp {
     await expect(this.sidebar).toBeVisible();
   }
 
+  /** Boots with no notes folder chosen, on the welcome screen. */
+  async bootWithoutFolder() {
+    await this.page.route((url) => url.pathname === "/", injectFakeBackend);
+    await this.page.addInitScript(() => {
+      window.aetherFakeNoFolder = true;
+    });
+    await this.page.goto("/");
+    this.booted = true;
+  }
+
   /** Reloads the page; the fake folder keeps its current files. */
   async reload() {
     await this.page.addInitScript(setSeed, await this.files());
