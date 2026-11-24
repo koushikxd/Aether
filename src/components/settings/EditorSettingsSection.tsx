@@ -436,63 +436,61 @@ export function AppearanceSettingsSection() {
                 fontSize: `${editorFontSettings.baseFontSize}px`,
               }}
             >
-              <h1>Kibble Maximization Protocol</h1>
+              <h1>Keeping a Reading Journal</h1>
               <p>
-                A comprehensive strategy document for getting your humans to
-                increase daily food portions.{" "}
-                <strong>Time-tested methods</strong> that actually work.
+                A short guide to remembering more of what you read.{" "}
+                <strong>Small habits</strong> that add up over a year of books.
               </p>
 
-              <h2>Primary Techniques</h2>
+              <h2>While You Read</h2>
               <ul>
                 <li>
-                  <strong>The Sad Eyes Method</strong> - Sit near food bowl,
-                  stare longingly
+                  <strong>Mark the margins</strong> - Underline the lines that
+                  stop you
                 </li>
                 <li>
-                  <strong>Strategic Meowing</strong> - Begin at 5 AM for maximum
-                  effectiveness
+                  <strong>One note per chapter</strong> - Write it before you
+                  turn the page
                 </li>
                 <li>
-                  <strong>Bowl Inspection</strong> - Loudly inspect empty bowl,
-                  then stare at human
+                  <strong>Ask a question</strong> - Note what you would ask the
+                  author
                 </li>
                 <li>
-                  <strong>The Figure Eight</strong> - Weave between their legs
-                  while they cook
+                  <strong>Keep a stack</strong> - Leave the next book on top of
+                  the last one
                 </li>
               </ul>
 
-              <h2>Advanced Protocol</h2>
+              <h2>After the Last Page</h2>
               <p>
-                For optimal results, combine multiple techniques. The most
-                successful combination involves the Sad Eyes Method followed
-                immediately by Strategic Meowing.
+                Close the book and write a summary from memory. Then compare it
+                with your chapter notes and fill in what you missed.
               </p>
 
               <div className="relative my-1">
                 <div className="absolute top-2 right-2 z-10">
                   <CodeCopyButton
-                    text={`function acquireFood() {
-  while (bowl.isEmpty()) {
-    meow();
-    rubAgainstLegs();
-    if (human.isInKitchen) {
-      stareIntently();
-    }
+                    text={`function finishChapter(book) {
+  const note = summarize(book.chapter);
+  journal.add(note);
+  if (book.hasNextChapter) {
+    book.turnPage();
+  } else {
+    shelf.push(book);
   }
 }`}
                   />
                 </div>
                 <pre className="pt-10">
                   <code>
-                    {`function acquireFood() {
-  while (bowl.isEmpty()) {
-    meow();
-    rubAgainstLegs();
-    if (human.isInKitchen) {
-      stareIntently();
-    }
+                    {`function finishChapter(book) {
+  const note = summarize(book.chapter);
+  journal.add(note);
+  if (book.hasNextChapter) {
+    book.turnPage();
+  } else {
+    shelf.push(book);
   }
 }`}
                   </code>
@@ -501,17 +499,17 @@ export function AppearanceSettingsSection() {
 
               <h2>Common Mistakes to Avoid</h2>
               <ol>
-                <li>Never accept the first "no" - persistence is key</li>
                 <li>
-                  Maintain consistency in meal times (your schedule, not theirs)
+                  Copying whole passages instead of writing your own words
                 </li>
-                <li>Don't forget to knock things off counters periodically</li>
+                <li>Waiting until the end of the book to take any notes</li>
+                <li>Never coming back to the notes once the book is shelved</li>
               </ol>
 
               <p>
-                Remember: <em>humans are trainable</em>. With dedication and the
-                right approach, you can increase portions by up to 40% within
-                the first month.
+                Remember:{" "}
+                <em>a note you revisit is worth ten you never read again</em>.
+                Pick one idea from each book and use it this week.
               </p>
             </div>
           </div>
