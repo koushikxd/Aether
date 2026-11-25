@@ -92,3 +92,33 @@ test("in source mode, an external change with no pending edits reloads the sourc
     0,
   );
 });
+
+test("pins the CLI writes to the settings file show in the sidebar", async ({
+  app,
+}) => {
+  const settings = ".aether/settings.json";
+  await app.seed({
+    "A.md": "# A\n",
+    "B.md": "# B\n",
+    [settings]: JSON.stringify({ pinnedNoteIds: ["A"] }),
+  });
+  const pinned = app.sidebar.getByRole("region", { name: "Pinned" });
+  await expect(
+    pinned.getByRole("button", { name: "A", exact: true }),
+  ).toBeVisible();
+
+  // The backend reports a settings file another program wrote
+  await app.page.evaluate(async (path) => {
+    const fake = window.aetherFake;
+    if (!fake) throw new Error("Fake backend missing");
+    fake.files[path] = JSON.stringify({ pinnedNoteIds: ["B"] });
+    await fake.emit("settings-changed", null);
+  }, settings);
+
+  await expect(
+    pinned.getByRole("button", { name: "B", exact: true }),
+  ).toBeVisible();
+  await expect(
+    pinned.getByRole("button", { name: "A", exact: true }),
+  ).toHaveCount(0);
+});

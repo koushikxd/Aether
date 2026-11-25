@@ -888,6 +888,24 @@ fn load_settings(notes_folder: &str) -> Settings {
     settings
 }
 
+/// Takes in a settings file another program (the CLI) wrote, and returns
+/// whether the settings in memory changed. A file that does not parse, as one
+/// caught mid-write, is skipped.
+fn reload_settings(settings: &RwLock<Settings>, notes_folder: &str) -> bool {
+    let parses = std::fs::read_to_string(get_settings_path(notes_folder))
+        .is_ok_and(|text| serde_json::from_str::<Settings>(&text).is_ok());
+    if !parses {
+        return false;
+    }
+    let fresh = load_settings(notes_folder);
+    let mut settings = settings.write().expect("settings write lock");
+    if serde_json::to_value(&*settings).ok() == serde_json::to_value(&fresh).ok() {
+        return false;
+    }
+    *settings = fresh;
+    true
+}
+
 // Save per-folder settings to disk, without the pins of private pages
 fn save_settings(notes_folder: &str, settings: &Settings) -> Result<()> {
     let path = get_settings_path(notes_folder);
@@ -1890,12 +1908,22 @@ fn setup_file_watcher(
 ) -> Result<FileWatcherState, String> {
     let folder_path = PathBuf::from(notes_folder);
     let notes_root = folder_path.clone();
+    let settings_path = get_settings_path(notes_folder);
+    let settings_folder = notes_folder.to_string();
     let app_handle = app.clone();
 
     let watcher = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
                 for path in event.paths.iter() {
+                    if *path == settings_path {
+                        if let Some(state) = app_handle.try_state::<AppState>() {
+                            if reload_settings(&state.settings, &settings_folder) {
+                                let _ = app_handle.emit("settings-changed", ());
+                            }
+                        }
+                        continue;
+                    }
                     // Read current ignored patterns from settings
                     let ignored_dirs = if let Some(state) = app_handle.try_state::<AppState>() {
                         let settings = state.settings.read().expect("settings read lock");

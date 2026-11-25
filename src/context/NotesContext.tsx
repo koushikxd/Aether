@@ -560,6 +560,15 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     };
   }, [selectNote, refreshNotes]);
 
+  // The backend took in a settings file another program (the CLI) wrote.
+  // The sidebar reads pins again when the notes list refreshes.
+  useEffect(() => {
+    const unlisten = listen("settings-changed", () => void refreshNotes());
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [refreshNotes]);
+
   // Refresh notes when folder changes
   useEffect(() => {
     if (notesFolder) {
