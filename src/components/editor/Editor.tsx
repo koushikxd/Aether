@@ -402,6 +402,9 @@ export function Editor({
   notesFolderRef.current = previewMode ? null : (notesCtx?.notesFolder ?? null);
   // Track if we need to save (use ref to avoid computing markdown on every keystroke)
   const needsSaveRef = useRef(false);
+  // The file changed on disk while the editor had edits not yet saved: saves
+  // wait until the user picks Refresh or Overwrite, or opens another note
+  const heldRef = useRef(false);
   // Stable refs for wikilink click handler (avoids re-registering listener on every notes change)
   const notesRef = useRef(notes);
   notesRef.current = notes;
@@ -692,7 +695,9 @@ export function Editor({
     }
     const editorInstance = editorRef.current;
     const noteId = loadedNoteIdRef.current;
-    if (needsSaveRef.current && editorInstance && noteId) {
+    if (heldRef.current) {
+      needsSaveRef.current = false;
+    } else if (needsSaveRef.current && editorInstance && noteId) {
       needsSaveRef.current = false;
       const doc = editorInstance.getJSON();
       void queueSave(noteId, (id, changes) => {
@@ -1494,6 +1499,7 @@ export function Editor({
     }
     // Reset source mode when switching notes
     if (!isSameNote) {
+      heldRef.current = false;
       setSourceMode(false);
       if (sourceTimeoutRef.current) {
         clearTimeout(sourceTimeoutRef.current);
@@ -1508,7 +1514,10 @@ export function Editor({
         // Manual reload - update the editor content
         lastReloadVersionRef.current = reloadVersion;
         loadedModifiedRef.current = currentNote.modified;
+        heldRef.current = false;
+        setSourceContent(currentNote.content);
         isLoadingRef.current = true;
+        const { from, to } = editor.state.selection;
         const manager = editor.storage.markdown?.manager;
         if (manager) {
           try {
@@ -1520,6 +1529,11 @@ export function Editor({
         } else {
           editor.commands.setContent(currentNote.content);
         }
+        const size = editor.state.doc.content.size;
+        editor.commands.setTextSelection({
+          from: Math.min(from, size),
+          to: Math.min(to, size),
+        });
         isLoadingRef.current = false;
         return;
       }
@@ -2236,12 +2250,35 @@ export function Editor({
         clearTimeout(sourceTimeoutRef.current);
       }
       sourceTimeoutRef.current = window.setTimeout(() => {
+        sourceTimeoutRef.current = null;
         const noteId = loadedNoteIdRef.current;
-        if (noteId) void queueSave(noteId, () => value);
+        if (noteId && !heldRef.current) void queueSave(noteId, () => value);
       }, 300);
     },
     [queueSave],
   );
+
+  // A file changed on disk: reload it unless the editor has unsaved edits,
+  // which then wait for Refresh or Overwrite
+  useEffect(() => {
+    if (!hasExternalChanges) return;
+    if (needsSaveRef.current || sourceTimeoutRef.current !== null) {
+      heldRef.current = true;
+    } else {
+      void reloadCurrentNote();
+    }
+  }, [hasExternalChanges, reloadCurrentNote]);
+
+  const overwriteExternalChanges = useCallback(() => {
+    heldRef.current = false;
+    const noteId = loadedNoteIdRef.current;
+    if (sourceMode) {
+      if (noteId) void queueSave(noteId, () => sourceContent);
+    } else {
+      needsSaveRef.current = true;
+      void flushPendingSave();
+    }
+  }, [sourceMode, sourceContent, queueSave, flushPendingSave]);
 
   if (!currentNote) {
     // Preview mode: show loading state (content not yet loaded)
@@ -2372,17 +2409,27 @@ export function Editor({
           className={`titlebar-no-drag flex items-center gap-px shrink-0 transition-opacity duration-400 ${needsSidebarDelay ? "delay-200" : ""} ${focusMode ? "opacity-0 pointer-events-none" : "opacity-100"}`}
         >
           {hasExternalChanges ? (
-            <Tooltip
-              content={`External changes detected (${mod}${isMac ? "" : "+"}R to refresh)`}
-            >
-              <button
-                onClick={reloadCurrentNote}
-                className="h-7 px-2 flex items-center gap-1 text-xs text-text-muted hover:bg-bg-emphasis rounded transition-colors font-medium"
+            <>
+              <Tooltip
+                content={`The file changed on disk. Load it and drop your unsaved edits (${mod}${isMac ? "" : "+"}R)`}
               >
-                <RefreshCwIcon className="w-4 h-4 stroke-[1.6]" />
-                <span>Refresh</span>
-              </button>
-            </Tooltip>
+                <button
+                  onClick={reloadCurrentNote}
+                  className="h-7 px-2 flex items-center gap-1 text-xs text-text-muted hover:bg-bg-emphasis rounded transition-colors font-medium"
+                >
+                  <RefreshCwIcon className="w-4 h-4 stroke-[1.6]" />
+                  <span>Refresh</span>
+                </button>
+              </Tooltip>
+              <Tooltip content="Save your edits over the file on disk">
+                <button
+                  onClick={overwriteExternalChanges}
+                  className="h-7 px-2 flex items-center text-xs text-text-muted hover:bg-bg-emphasis rounded transition-colors font-medium"
+                >
+                  Overwrite
+                </button>
+              </Tooltip>
+            </>
           ) : isSaving ? (
             <Tooltip content="Saving...">
               <div className="h-7 w-7 flex items-center justify-center">

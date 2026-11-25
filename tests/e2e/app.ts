@@ -107,6 +107,14 @@ export class AetherApp {
     );
   }
 
+  /** Writes a note's file as another program (the CLI) would, and reports it like the watcher. */
+  async writeExternally(path: string, content: string) {
+    await this.page.evaluate(
+      ([file, text]) => window.aetherFake?.writeExternally(file, text),
+      [path, content] as const,
+    );
+  }
+
   /** Makes the next file-picker dialog return this path (or paths). */
   async pickFile(path: string | string[]) {
     await this.page.evaluate((picked) => {

@@ -36,6 +36,8 @@ export interface FakeBackend {
   noteCreated: number | null;
   /** Ms `move_note` takes after the watcher reports the move (0 = no report). */
   moveLag: number;
+  /** Writes a note's file as another program would, and reports it like the watcher. */
+  writeExternally: (path: string, content: string) => Promise<void>;
 }
 
 declare global {
@@ -588,6 +590,10 @@ const fake: FakeBackend = {
   // 2026-03-15 12:00 UTC: the same calendar day in every time zone.
   noteCreated: 1773576000,
   moveLag: 0,
+  writeExternally: (path, content) => {
+    writeFile(path, content);
+    return emit("file-change", { changed_ids: [path.replace(/\.md$/, "")] });
+  },
 };
 
 const handlers: Record<string, Handler> = {
