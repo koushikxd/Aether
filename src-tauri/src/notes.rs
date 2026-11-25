@@ -13,7 +13,7 @@ use crate::{
 use std::collections::HashSet;
 use std::path::Path;
 
-pub use crate::relink::{Move, Moved};
+pub use crate::relink::{linked_paths, Move, Moved};
 pub use crate::vault::PrivateSet;
 
 /// The folder names the user chose to ignore, from the folder's settings

@@ -57,6 +57,9 @@ enum Command {
     },
     /// Print a page's markdown, hash, title, and sub-pages
     Read { page: String },
+    /// Report broken links, leftover conflict markers, links to unavailable
+    /// pages, and file names that no longer follow the first heading
+    Check,
     /// Create a page titled TITLE, with its body from stdin; prints its id
     Create {
         title: String,
@@ -445,12 +448,104 @@ fn move_page(folder: &Folder, id: &str, to: &str) -> Result<Report, Failure> {
     })
 }
 
+/// The line number of the first git conflict marker (`<<<<<<<` or
+/// `>>>>>>>`) outside fenced code. A lone `=======` is a setext heading.
+fn conflict_marker(markdown: &str) -> Option<usize> {
+    let mut fence: Option<(char, usize)> = None;
+    for (number, line) in markdown.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
+        let run = marker.map_or(0, |c| trimmed.chars().take_while(|x| *x == c).count());
+        match (fence, marker) {
+            (None, Some(c)) if run >= 3 => fence = Some((c, run)),
+            (Some((open, len)), Some(c))
+                if c == open && run >= len && trimmed[run..].trim().is_empty() =>
+            {
+                fence = None
+            }
+            (None, _) => {
+                let is_marker = |prefix: &str| {
+                    line.strip_prefix(prefix)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+                };
+                if is_marker("<<<<<<<") || is_marker(">>>>>>>") {
+                    return Some(number + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn check(folder: &Folder) -> Result<Report, Failure> {
+    let mut problems: Vec<(String, &str, String)> = Vec::new();
+    for page in folder.pages() {
+        let path = format!("{}.md", page.id);
+        // A bare page has no file to check.
+        let Ok(markdown) = std::fs::read_to_string(folder.root.join(&path)) else {
+            continue;
+        };
+        for target in notes::linked_paths(&markdown, &path) {
+            if !folder.private.contains(&target) && !folder.root.join(&target).exists() {
+                problems.push((
+                    page.id.clone(),
+                    "broken_link",
+                    format!("links to {target}, which does not exist"),
+                ));
+            }
+        }
+        if let Some(line) = conflict_marker(&markdown) {
+            problems.push((
+                page.id.clone(),
+                "conflict_markers",
+                format!("has a git conflict marker on line {line}"),
+            ));
+        }
+        if folder.private.linked_from_public(&path) {
+            problems.push((
+                page.id.clone(),
+                "links_to_unavailable_page",
+                "links to an unavailable page".to_string(),
+            ));
+        }
+        let renamed = notes::rename_target(&folder.root, &folder.ignored, &page.id, &markdown)
+            .map_err(Failure::Other)?;
+        if renamed.is_some() {
+            problems.push((
+                page.id.clone(),
+                "title_mismatch",
+                format!(
+                    "the first heading is \"{}\", so the app renames the page on its next save",
+                    page.title
+                ),
+            ));
+        }
+    }
+    let text = if problems.is_empty() {
+        "no problems\n".to_string()
+    } else {
+        problems
+            .iter()
+            .map(|(id, _, message)| format!("{id}: {message}\n"))
+            .collect()
+    };
+    let json = json!({
+        "problems": problems
+            .iter()
+            .map(|(id, kind, message)| json!({ "id": id, "kind": kind, "message": message }))
+            .collect::<Vec<_>>(),
+    });
+    Ok(Report { json, text })
+}
+
 fn run(cli: Cli) -> Result<Report, Failure> {
     let folder = Folder::open(cli.folder)?;
     match cli.command {
         Command::List { under } => list(&folder, under.as_deref()),
         Command::Search { query, limit } => Ok(search(&folder, &query.join(" "), limit)),
         Command::Read { page } => read(&folder, &page),
+        Command::Check => check(&folder),
         Command::Create { title, under } => create(&folder, &title, under.as_deref()),
         Command::Append { page } => append(&folder, &page),
         Command::Edit { page, if_match } => edit(&folder, &page, &if_match),

@@ -411,6 +411,12 @@ impl PrivateSet {
         self.roots.iter().any(|r| dir == r || inside(dir, r))
     }
 
+    /// Whether public note `path` (`<id>.md`) links to a private page, by a
+    /// relative link or a `[[Title]]` wikilink.
+    pub fn linked_from_public(&self, path: &str) -> bool {
+        self.linked_from_public.contains(path)
+    }
+
     /// The private files that exist on disk.
     fn files(&self, root: &Path) -> BTreeSet<String> {
         let mut files = self.assets.clone();

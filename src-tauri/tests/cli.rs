@@ -713,3 +713,55 @@ fn move_of_into_or_onto_a_private_page_is_unavailable() {
     }
     assert_eq!(tree(notes.path()), before);
 }
+
+#[test]
+fn check_reports_each_problem_once_and_nothing_private() {
+    let mut cli = Cli::new("check_reports_each_problem_once_and_nothing_private");
+    let notes = notes_folder(&[
+        ("Fine.md", "# Fine\n\n[ok](Broken.md) ![x](assets/x.png)\n\nSetext\n=======\n\n```\n<<<<<<< HEAD\n```\n"),
+        ("assets/x.png", "png"),
+        ("Broken.md", "# Broken\n\n[gone](Missing.md) ![img](assets/nothing.png)\n"),
+        ("Conflict.md", "# Conflict\n\n<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> other\n"),
+        ("Leaky.md", "# Leaky\n\n[s](Secret/Child.md)\n"),
+        ("Wiki.md", "# Wiki\n\n[[Secret]]\n"),
+        ("Renamed.md", "# Something Else\n"),
+        ("Secret.md", "# Secret\n\n[gone](Nowhere.md)\n\n<<<<<<< HEAD\n"),
+        ("Secret/Child.md", "# Not Child\n"),
+    ]);
+    mark_private(notes.path(), &["Secret"]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&["--folder", folder, "--json", "check"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let problems: Vec<(String, String)> = json(&out)["problems"]
+        .as_array()
+        .expect("problems")
+        .iter()
+        .map(|p| {
+            (
+                p["id"].as_str().expect("id").to_string(),
+                p["kind"].as_str().expect("kind").to_string(),
+            )
+        })
+        .collect();
+    let expected = [
+        ("Broken", "broken_link"),
+        ("Broken", "broken_link"),
+        ("Conflict", "conflict_markers"),
+        ("Leaky", "links_to_unavailable_page"),
+        ("Renamed", "title_mismatch"),
+        ("Wiki", "links_to_unavailable_page"),
+    ];
+    let expected: Vec<(String, String)> =
+        expected.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    assert_eq!(problems, expected);
+    assert!(out.stdout.contains("Missing.md") && out.stdout.contains("assets/nothing.png"));
+    assert!(out.stdout.contains("links to an unavailable page"), "{}", out.stdout);
+
+    let text = cli.run(&["--folder", folder, "check"]);
+    for out in [&out, &text] {
+        for private in ["Secret", "Child", "Nowhere"] {
+            assert!(!out.stdout.contains(private), "{private} leaked: {}", out.stdout);
+        }
+    }
+}
