@@ -224,10 +224,33 @@ impl Folder {
     /// Fails when any of `ids` is private, so a new or renamed page never
     /// gives away a private name, even by taking the next free one after it.
     fn check_names<'a>(&self, ids: impl IntoIterator<Item = &'a String>) -> Result<(), Failure> {
-        if ids.into_iter().any(|id| self.is_private(id)) {
+        if ids
+            .into_iter()
+            .any(|id| self.is_private(id) || self.is_private(&self.as_on_disk(id)))
+        {
             return Err(Failure::Unavailable);
         }
         Ok(())
+    }
+
+    /// `id` respelled as the entries a case-insensitive file system matches
+    /// it to, so a mark under another spelling still applies.
+    fn as_on_disk(&self, id: &str) -> String {
+        let mut dir = self.root.clone();
+        let mut parts = Vec::new();
+        for part in id.split('/') {
+            let found = std::fs::read_dir(&dir).ok().and_then(|entries| {
+                entries.flatten().find_map(|entry| {
+                    let name = entry.file_name().into_string().ok()?;
+                    let stem = name.strip_suffix(".md").unwrap_or(&name);
+                    (stem.to_lowercase() == part.to_lowercase()).then(|| stem.to_string())
+                })
+            });
+            let part = found.unwrap_or_else(|| part.to_string());
+            dir.push(&part);
+            parts.push(part);
+        }
+        parts.join("/")
     }
 
     /// Saves `content` to page `id`, renaming it when its first heading

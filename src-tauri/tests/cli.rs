@@ -384,6 +384,26 @@ fn names_that_differ_only_by_case_create_and_rename_as_usual() {
 }
 
 #[test]
+fn creating_a_name_that_differs_from_a_private_page_only_by_case_is_unavailable() {
+    let mut cli =
+        Cli::new("creating_a_name_that_differs_from_a_private_page_only_by_case_is_unavailable");
+    let notes = private_fixture();
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    for args in [
+        vec!["create", "secret"],
+        vec!["create", "HIDDEN", "--under", "Public"],
+    ] {
+        let out = cli.run_with(
+            &[&["--folder", folder, "--json"], &args[..]].concat(),
+            Some("x"),
+        );
+        assert_eq!(out.code, 2, "{args:?}: {}", out.stdout);
+        assert_eq!(json(&out)["error"]["code"], "unavailable");
+    }
+}
+
+#[test]
 fn a_notes_folder_whose_git_is_a_pointer_file_still_works() {
     let mut cli = Cli::new("a_notes_folder_whose_git_is_a_pointer_file_still_works");
     let notes = TempDir::new().expect("create notes folder");
