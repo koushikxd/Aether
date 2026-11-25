@@ -183,8 +183,12 @@ impl Folder {
         self.private.contains(&format!("{id}.md"))
             || self.private.contains_dir(id)
             || [format!("{id}.md"), id.to_string()].iter().any(|rel| {
-                let path = self.root.join(rel);
-                path.canonicalize().is_ok_and(|real| real != path)
+                let mut path = self.root.clone();
+                rel.split('/').any(|part| {
+                    path.push(part);
+                    path.symlink_metadata()
+                        .is_ok_and(|m| m.file_type().is_symlink())
+                })
             })
     }
 

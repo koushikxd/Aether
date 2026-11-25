@@ -356,6 +356,34 @@ fn a_symlinked_page_or_a_nested_notes_folder_reaches_nothing_private() {
 }
 
 #[test]
+fn names_that_differ_only_by_case_create_and_rename_as_usual() {
+    let mut cli = Cli::new("names_that_differ_only_by_case_create_and_rename_as_usual");
+    let notes = notes_folder(&[("Page.md", "# Page\n"), ("Other.md", "# Other\n")]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run_with(
+        &["--folder", folder, "--json", "create", "page"],
+        Some("Body"),
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+
+    let out = cli.run_with(
+        &[
+            "--folder",
+            folder,
+            "--json",
+            "edit",
+            "Other",
+            "--if-match",
+            &sha256_hex("# Other\n"),
+        ],
+        Some("# other\n"),
+    );
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert_eq!(json(&out)["id"], "other");
+}
+
+#[test]
 fn a_notes_folder_whose_git_is_a_pointer_file_still_works() {
     let mut cli = Cli::new("a_notes_folder_whose_git_is_a_pointer_file_still_works");
     let notes = TempDir::new().expect("create notes folder");
