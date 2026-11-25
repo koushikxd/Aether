@@ -177,27 +177,15 @@ impl Folder {
         })
     }
 
-    /// Whether `id` is marked private, directly or through a symlink to a marked page.
+    /// Whether `id` is marked private, or reached through a symlink, which could
+    /// lead to a marked page here or in another notes folder.
     fn is_private(&self, id: &str) -> bool {
-        self.marked(id)
-            || self
-                .real_id(id)
-                .is_some_and(|real| real != id && self.marked(&real))
-    }
-
-    fn marked(&self, id: &str) -> bool {
-        self.private.contains(&format!("{id}.md")) || self.private.contains_dir(id)
-    }
-
-    /// The page id that `id` resolves to through symlinks, when it stays in the notes folder.
-    fn real_id(&self, id: &str) -> Option<String> {
-        let file = self.root.join(format!("{id}.md")).canonicalize();
-        let (real, suffix) = match file {
-            Ok(real) => (real, ".md"),
-            Err(_) => (self.root.join(id).canonicalize().ok()?, ""),
-        };
-        let rel = real.strip_prefix(&self.root).ok()?.to_str()?;
-        Some(rel.strip_suffix(suffix)?.replace('\\', "/"))
+        self.private.contains(&format!("{id}.md"))
+            || self.private.contains_dir(id)
+            || [format!("{id}.md"), id.to_string()].iter().any(|rel| {
+                let path = self.root.join(rel);
+                path.canonicalize().is_ok_and(|real| real != path)
+            })
     }
 
     /// Checks page id `id` names a public page that can exist: valid, not

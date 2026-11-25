@@ -301,10 +301,9 @@ fn a_private_page_stays_unreadable_by_another_spelling_a_sub_folder_or_damaged_m
 
 #[cfg(unix)]
 #[test]
-fn a_symlink_to_a_private_page_or_a_nested_notes_folder_reaches_nothing_private() {
+fn a_symlinked_page_or_a_nested_notes_folder_reaches_nothing_private() {
     use std::os::unix::fs::symlink;
-    let mut cli =
-        Cli::new("a_symlink_to_a_private_page_or_a_nested_notes_folder_reaches_nothing_private");
+    let mut cli = Cli::new("a_symlinked_page_or_a_nested_notes_folder_reaches_nothing_private");
     let notes = private_fixture();
     let folder = notes.path().to_str().expect("utf-8 path");
     symlink(
@@ -313,12 +312,20 @@ fn a_symlink_to_a_private_page_or_a_nested_notes_folder_reaches_nothing_private(
     )
     .expect("link page");
     symlink(notes.path().join("Secret"), notes.path().join("Linked")).expect("link folder");
+    // Into another notes folder, whose marks this one cannot see
+    let other = private_fixture();
+    symlink(
+        other.path().join("Secret.md"),
+        notes.path().join("Elsewhere.md"),
+    )
+    .expect("link out");
 
     for args in [
         vec!["list"],
         vec!["search", "zebra"],
         vec!["read", "Alias"],
         vec!["read", "Linked/Child"],
+        vec!["read", "Elsewhere"],
     ] {
         let out = cli.run(&[&["--folder", folder, "--json"], &args[..]].concat());
         assert!(
@@ -333,6 +340,11 @@ fn a_symlink_to_a_private_page_or_a_nested_notes_folder_reaches_nothing_private(
         );
         assert!(!out.stdout.contains("Alias"), "{args:?}: {}", out.stdout);
         assert!(!out.stdout.contains("Linked"), "{args:?}: {}", out.stdout);
+        assert!(
+            !out.stdout.contains("Elsewhere"),
+            "{args:?}: {}",
+            out.stdout
+        );
     }
 
     // A notes folder the app once opened inside this one
