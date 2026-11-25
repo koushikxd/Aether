@@ -1,6 +1,6 @@
 ---
 name: aether
-description: Read and write the user's Aether notes through the `aether` CLI. Use when the user names Aether, for example to save or clip a snippet, SVG, or rule to Aether, add something to an Aether page, or find, read, edit, move, or check Aether pages.
+description: Read and write the user's Aether notes through the `aether` CLI. Use when the user names Aether, for example to clip a snippet, SVG, or rule to Aether, add something to an Aether page, or find, read, edit, move, or check Aether pages.
 ---
 
 # Aether
@@ -14,7 +14,7 @@ Aether holds the user's notes, so it is outside your context until the user asks
 - Pass `--json` on every command, and parse the one JSON object it prints on stdout. Exit codes: 0 ok, 1 error, 2 not found or unavailable, 3 conflict. Errors print `{"error":{"code","message"}}`.
 - Notes folder: inside the notes folder the CLI finds it from the current directory. From another repo it uses the folder open in the app; pass `--folder <path>` when the user names a folder, or when a command fails because no folder is found.
 - A page is named by its **id**: its path in the notes folder, `/` separators, no `.md` (`Components/Buttons`).
-- `create`, `append`, and `edit` read markdown from stdin until it closes. Feed it through a quoted heredoc (`<<'EOF'`) so `$` and backticks in code reach the page unchanged. For `create` with no body, pass `< /dev/null`: an open stdin makes the command wait forever.
+- `create`, `append`, and `edit` read markdown from stdin until it closes. Feed it through a quoted heredoc (`<<'EOF'`) so `$` and backticks in code reach the page unchanged. For `create` with no body, pass `< /dev/null`.
 
 Run `aether <command> --help` for any flag not covered here.
 
