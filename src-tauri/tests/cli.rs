@@ -364,3 +364,352 @@ fn app_and_ignored_folders_never_hold_pages() {
         assert_eq!(found, expected);
     }
 }
+
+fn read(root: &Path, rel: &str) -> String {
+    std::fs::read_to_string(root.join(rel)).expect("read file")
+}
+
+/// Every file outside `.git`, sorted, with `/` separators.
+fn tree(root: &Path) -> Vec<String> {
+    let mut files: Vec<String> = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| e.file_name() != ".git")
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .map(|e| {
+            let rel = e.path().strip_prefix(root).expect("inside root");
+            rel.to_string_lossy().replace('\\', "/")
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+fn marks(root: &Path) -> serde_json::Value {
+    let local: serde_json::Value =
+        serde_json::from_str(&read(root, ".git/aether-vault.json")).expect("vault state");
+    local["marks"].clone()
+}
+
+#[test]
+fn create_writes_a_page_at_the_root_or_under_a_parent() {
+    let mut cli = Cli::new("create_writes_a_page_at_the_root_or_under_a_parent");
+    let notes = notes_folder(&[("Parent.md", "# Parent\n")]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run_with(
+        &["--folder", folder, "--json", "create", "My Page"],
+        Some("Hello"),
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let created = json(&out);
+    assert_eq!(created["id"], "My Page");
+    assert_eq!(read(notes.path(), "My Page.md"), "# My Page\n\nHello\n");
+    assert_eq!(created["hash"], sha256_hex("# My Page\n\nHello\n"));
+
+    let out = cli.run(&["--folder", folder, "--json", "create", "My Page"]);
+    assert_eq!(json(&out)["id"], "My Page-1", "{}", out.stderr);
+    assert_eq!(read(notes.path(), "My Page-1.md"), "# My Page\n");
+
+    let out = cli.run_with(
+        &[
+            "--folder", folder, "--json", "create", "Child", "--under", "Parent",
+        ],
+        Some("Body\n"),
+    );
+    assert_eq!(json(&out)["id"], "Parent/Child", "{}", out.stderr);
+    assert!(notes.path().join("Parent").is_dir());
+    assert_eq!(read(notes.path(), "Parent/Child.md"), "# Child\n\nBody\n");
+
+    let out = cli.run(&[
+        "--folder", folder, "--json", "create", "Orphan", "--under", "Nope",
+    ]);
+    assert_eq!(out.code, 2);
+    assert_eq!(json(&out)["error"]["code"], "not_found");
+}
+
+#[test]
+fn create_under_or_named_like_a_private_page_is_unavailable() {
+    let mut cli = Cli::new("create_under_or_named_like_a_private_page_is_unavailable");
+    let notes = private_fixture();
+    write(notes.path(), "Dup.md", "# Dup\n");
+    write(notes.path(), "Dup-1.md", "# Dup\n");
+    mark_private(notes.path(), &["Secret", "Public/Hidden", "Dup-1"]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+    let before = tree(notes.path());
+
+    for args in [
+        vec!["create", "New", "--under", "Secret"],
+        vec!["create", "New", "--under", "Secret/Child"],
+        vec!["create", "Secret"],
+        vec!["create", "Hidden", "--under", "Public"],
+        // Dup is taken, and Dup-2 would give away that Dup-1 exists.
+        vec!["create", "Dup"],
+    ] {
+        let mut full = vec!["--folder", folder, "--json"];
+        full.extend(&args);
+        let out = cli.run(&full);
+        assert_eq!(out.code, 2, "{args:?}: {}", out.stdout);
+        assert_eq!(json(&out)["error"]["message"], "path unavailable");
+        for name in ["Secret", "Hidden", "Dup-1", "Child"] {
+            assert!(!out.stderr.contains(name), "{}", out.stderr);
+        }
+    }
+    assert_eq!(tree(notes.path()), before);
+}
+
+#[test]
+fn edit_with_a_stale_hash_exits_3_and_leaves_the_file() {
+    let mut cli = Cli::new("edit_with_a_stale_hash_exits_3_and_leaves_the_file");
+    let notes = notes_folder(&[("Page.md", "# Page\n\nOne\n")]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&["--folder", folder, "--json", "read", "Page"]);
+    let hash = json(&out)["hash"].as_str().expect("hash").to_string();
+    write(notes.path(), "Page.md", "# Page\n\nChanged elsewhere\n");
+
+    let out = cli.run_with(
+        &[
+            "--folder",
+            folder,
+            "--json",
+            "edit",
+            "Page",
+            "--if-match",
+            &hash,
+        ],
+        Some("# Page\n\nMine\n"),
+    );
+    assert_eq!(out.code, 3, "{}", out.stderr);
+    assert_eq!(json(&out)["error"]["code"], "conflict");
+    assert_eq!(
+        read(notes.path(), "Page.md"),
+        "# Page\n\nChanged elsewhere\n"
+    );
+
+    let out = cli.run(&["--folder", folder, "--json", "read", "Page"]);
+    let hash = json(&out)["hash"].as_str().expect("hash").to_string();
+    let out = cli.run_with(
+        &[
+            "--folder",
+            folder,
+            "--json",
+            "edit",
+            "Page",
+            "--if-match",
+            &hash,
+        ],
+        Some("# Page\n\nMine\n"),
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(json(&out)["hash"], sha256_hex("# Page\n\nMine\n"));
+    assert_eq!(read(notes.path(), "Page.md"), "# Page\n\nMine\n");
+
+    let out = cli.run_with(&["--folder", folder, "edit", "Page"], Some("# Page\n"));
+    assert_eq!(out.code, 1, "edit needs --if-match: {}", out.stderr);
+}
+
+#[test]
+fn edit_that_changes_the_heading_renames_the_page_and_follows_links() {
+    let mut cli = Cli::new("edit_that_changes_the_heading_renames_the_page_and_follows_links");
+    let notes = notes_folder(&[
+        ("Old.md", "# Old\n"),
+        ("Old/Kid.md", "# Kid\n\n[up](../Old.md)\n"),
+        ("Index.md", "# Index\n\n[o](Old.md) [k](Old/Kid.md)\n"),
+        (
+            ".aether/settings.json",
+            r#"{"theme":{"mode":"system"},"pinnedNoteIds":["Old/Kid"]}"#,
+        ),
+    ]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+    let hash = sha256_hex("# Old\n");
+
+    let out = cli.run_with(
+        &[
+            "--folder",
+            folder,
+            "--json",
+            "edit",
+            "Old",
+            "--if-match",
+            &hash,
+        ],
+        Some("# New\n\nBody\n"),
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(json(&out)["id"], "New");
+    assert_eq!(
+        tree(notes.path()),
+        [".aether/settings.json", "Index.md", "New.md", "New/Kid.md"]
+    );
+    assert_eq!(read(notes.path(), "New.md"), "# New\n\nBody\n");
+    assert_eq!(
+        read(notes.path(), "New/Kid.md"),
+        "# Kid\n\n[up](../New.md)\n"
+    );
+    assert_eq!(
+        read(notes.path(), "Index.md"),
+        "# Index\n\n[o](New.md) [k](New/Kid.md)\n"
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(&read(notes.path(), ".aether/settings.json")).expect("settings");
+    assert_eq!(settings["pinnedNoteIds"], serde_json::json!(["New/Kid"]));
+}
+
+#[test]
+fn edit_that_renames_onto_a_private_name_is_unavailable() {
+    let mut cli = Cli::new("edit_that_renames_onto_a_private_name_is_unavailable");
+    let notes = private_fixture();
+    let folder = notes.path().to_str().expect("utf-8 path");
+    let hash = sha256_hex(PRIVATE_FIXTURE[1].1);
+
+    let out = cli.run_with(
+        &[
+            "--folder",
+            folder,
+            "--json",
+            "edit",
+            "Public/Sub",
+            "--if-match",
+            &hash,
+        ],
+        Some("# Hidden\n"),
+    );
+    assert_eq!(out.code, 2, "{}", out.stdout);
+    assert_eq!(read(notes.path(), "Public/Sub.md"), PRIVATE_FIXTURE[1].1);
+
+    let out = cli.run_with(
+        &[
+            "--folder",
+            folder,
+            "--json",
+            "edit",
+            "Secret",
+            "--if-match",
+            "x",
+        ],
+        Some("# Secret\n"),
+    );
+    assert_eq!(out.code, 2);
+    let out = cli.run_with(
+        &["--folder", folder, "--json", "append", "Secret"],
+        Some("x"),
+    );
+    assert_eq!(out.code, 2);
+    assert_eq!(read(notes.path(), "Secret.md"), PRIVATE_FIXTURE[3].1);
+}
+
+#[test]
+fn append_adds_text_after_a_blank_line_and_writes_a_bare_page() {
+    let mut cli = Cli::new("append_adds_text_after_a_blank_line_and_writes_a_bare_page");
+    let notes = notes_folder(&[("Page.md", "# Page\n\nOne\n"), ("Work/Task.md", "# Task\n")]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run_with(
+        &["--folder", folder, "--json", "append", "Page"],
+        Some("Two"),
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(read(notes.path(), "Page.md"), "# Page\n\nOne\n\nTwo\n");
+    assert_eq!(json(&out)["hash"], sha256_hex("# Page\n\nOne\n\nTwo\n"));
+
+    let out = cli.run_with(
+        &["--folder", folder, "--json", "append", "Work"],
+        Some("More\n"),
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(read(notes.path(), "Work.md"), "# Work\n\nMore\n");
+}
+
+#[test]
+fn move_follows_links_private_marks_and_pins() {
+    let mut cli = Cli::new("move_follows_links_private_marks_and_pins");
+    let notes = notes_folder(&[
+        ("Page.md", "# Page\n\n[Child](Page/Child.md)\n"),
+        ("Page/Child.md", "# Child\n\n[Up](../Page.md)\n"),
+        ("Page/Hidden.md", "# Hidden\n"),
+        (
+            "Index.md",
+            "# Index\n\n[Page](Page.md) [Child](Page/Child.md)\n",
+        ),
+        ("Archive.md", "# Archive\n"),
+        (
+            ".aether/settings.json",
+            r#"{"theme":{"mode":"system"},"pinnedNoteIds":["Page/Child"]}"#,
+        ),
+    ]);
+    mark_private(notes.path(), &["Page/Hidden"]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&[
+        "--folder", folder, "--json", "move", "Page", "--to", "Archive",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(json(&out)["id"], "Archive/Page");
+    assert!(!out.stdout.contains("Hidden"), "{}", out.stdout);
+    assert_eq!(
+        read(notes.path(), "Index.md"),
+        "# Index\n\n[Page](Archive/Page.md) [Child](Archive/Page/Child.md)\n"
+    );
+    assert_eq!(
+        read(notes.path(), "Archive/Page/Child.md"),
+        "# Child\n\n[Up](../Page.md)\n"
+    );
+    assert_eq!(
+        marks(notes.path()),
+        serde_json::json!(["Archive/Page/Hidden"])
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(&read(notes.path(), ".aether/settings.json")).expect("settings");
+    assert_eq!(
+        settings["pinnedNoteIds"],
+        serde_json::json!(["Archive/Page/Child"])
+    );
+
+    let out = cli.run(&[
+        "--folder",
+        folder,
+        "--json",
+        "move",
+        "Archive/Page",
+        "--to",
+        "/",
+    ]);
+    assert_eq!(json(&out)["id"], "Page", "{}", out.stderr);
+
+    let out = cli.run(&[
+        "--folder",
+        folder,
+        "--json",
+        "move",
+        "Page",
+        "--to",
+        "Page/Child",
+    ]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(notes.path().join("Page.md").is_file());
+}
+
+#[test]
+fn move_of_into_or_onto_a_private_page_is_unavailable() {
+    let mut cli = Cli::new("move_of_into_or_onto_a_private_page_is_unavailable");
+    let notes = private_fixture();
+    write(notes.path(), "Other/Hidden.md", "# Hidden\n");
+    write(notes.path(), "Other.md", "# Other\n");
+    let folder = notes.path().to_str().expect("utf-8 path");
+    let before = tree(notes.path());
+
+    for args in [
+        ["move", "Secret", "--to", "/"],
+        ["move", "Public/Sub", "--to", "Secret"],
+        // Public/Hidden is private, so Other/Hidden cannot land next to it.
+        ["move", "Other/Hidden", "--to", "Public"],
+    ] {
+        let mut full = vec!["--folder", folder, "--json"];
+        full.extend(args);
+        let out = cli.run(&full);
+        assert_eq!(out.code, 2, "{args:?}: {}", out.stdout);
+        assert_eq!(json(&out)["error"]["message"], "path unavailable");
+    }
+    assert_eq!(tree(notes.path()), before);
+}

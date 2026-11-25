@@ -57,11 +57,35 @@ enum Command {
     },
     /// Print a page's markdown, hash, title, and sub-pages
     Read { page: String },
+    /// Create a page titled TITLE, with its body from stdin; prints its id
+    Create {
+        title: String,
+        /// Make it a sub-page of this page
+        #[arg(long, value_name = "PAGE")]
+        under: Option<String>,
+    },
+    /// Append stdin to a page, after a blank line
+    Append { page: String },
+    /// Replace a page's markdown with stdin. A new first heading renames the page
+    Edit {
+        page: String,
+        /// The hash from `read`. Fails with exit code 3 if the page changed since
+        #[arg(long, value_name = "HASH")]
+        if_match: String,
+    },
+    /// Move a page and its sub-pages under another page, or to the top level with /
+    Move {
+        page: String,
+        /// The new parent page, or / for the top level
+        #[arg(long, value_name = "PAGE")]
+        to: String,
+    },
 }
 
 enum Failure {
     NotFound,
     Unavailable,
+    Conflict,
     Invalid(String),
     Other(String),
 }
@@ -71,6 +95,7 @@ impl Failure {
         match self {
             Failure::NotFound => "not_found",
             Failure::Unavailable => "unavailable",
+            Failure::Conflict => "conflict",
             Failure::Invalid(_) => "invalid",
             Failure::Other(_) => "error",
         }
@@ -79,6 +104,7 @@ impl Failure {
     fn exit_code(&self) -> u8 {
         match self {
             Failure::NotFound | Failure::Unavailable => 2,
+            Failure::Conflict => 3,
             Failure::Invalid(_) | Failure::Other(_) => 1,
         }
     }
@@ -87,6 +113,9 @@ impl Failure {
         match self {
             Failure::NotFound => "page not found".to_string(),
             Failure::Unavailable => "path unavailable".to_string(),
+            Failure::Conflict => {
+                "the page changed since it was read: read it again and redo the edit".to_string()
+            }
             Failure::Invalid(message) | Failure::Other(message) => message.clone(),
         }
     }
@@ -143,6 +172,29 @@ impl Folder {
                 Failure::Other(e)
             }
         })
+    }
+
+    /// Fails when any of `ids` is private, so a new or renamed page never
+    /// gives away a private name, even by taking the next free one after it.
+    fn check_names<'a>(&self, ids: impl IntoIterator<Item = &'a String>) -> Result<(), Failure> {
+        if ids.into_iter().any(|id| self.is_private(id)) {
+            return Err(Failure::Unavailable);
+        }
+        Ok(())
+    }
+
+    /// Saves `content` to page `id`, renaming it when its first heading
+    /// changed. Returns the page's id and hash after the save.
+    fn save(&self, id: &str, content: &str) -> Result<Report, Failure> {
+        let target =
+            notes::rename_target(&self.root, &self.ignored, id, content).map_err(Failure::Other)?;
+        if let Some((new_id, passed)) = &target {
+            self.check_names(passed.iter().chain([new_id]))?;
+        }
+        let saved =
+            notes::save(&self.root, &self.ignored, Some(id), content).map_err(Failure::Other)?;
+        notes::follow_pins(&self.root, &saved.moves);
+        Ok(written(&saved.note))
     }
 
     /// Every public page, sorted by id.
@@ -298,12 +350,111 @@ fn read(folder: &Folder, id: &str) -> Result<Report, Failure> {
     Ok(Report { json, text })
 }
 
+/// The id and hash of a page just written.
+fn written(note: &aether_lib::Note) -> Report {
+    let hash = hash(&note.content);
+    Report {
+        text: format!("{}\nhash: {hash}\n", note.id),
+        json: json!({ "id": note.id, "hash": hash }),
+    }
+}
+
+fn stdin() -> Result<String, Failure> {
+    use std::io::{IsTerminal, Read};
+    let mut text = String::new();
+    if !std::io::stdin().is_terminal() {
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| Failure::Other(format!("could not read stdin: {e}")))?;
+    }
+    Ok(text)
+}
+
+/// stdin, which must hold something.
+fn required_stdin() -> Result<String, Failure> {
+    let text = stdin()?;
+    if text.is_empty() {
+        return Err(Failure::Invalid("pipe the markdown on stdin".to_string()));
+    }
+    Ok(text)
+}
+
+/// `text` with exactly one newline at the end.
+fn with_newline(text: &str) -> String {
+    format!("{}\n", text.trim_end_matches(['\n', '\r']))
+}
+
+fn create(folder: &Folder, title: &str, under: Option<&str>) -> Result<Report, Failure> {
+    if let Some(parent) = under {
+        folder.read(parent)?;
+    }
+    let body = stdin()?;
+    let content = if body.trim().is_empty() {
+        format!("# {title}\n")
+    } else {
+        with_newline(&format!("# {title}\n\n{body}"))
+    };
+    let (id, passed) = notes::new_page_id(&folder.root, under, &content);
+    folder.check_names(passed.iter().chain([&id]))?;
+    let note =
+        notes::create(&folder.root, &folder.ignored, under, &content).map_err(Failure::Other)?;
+    Ok(written(&note))
+}
+
+fn append(folder: &Folder, id: &str) -> Result<Report, Failure> {
+    let text = required_stdin()?;
+    let note = folder.read(id)?;
+    let content = format!(
+        "{}\n\n{}",
+        note.content.trim_end_matches(['\n', '\r']),
+        with_newline(&text)
+    );
+    folder.save(id, &content)
+}
+
+fn edit(folder: &Folder, id: &str, if_match: &str) -> Result<Report, Failure> {
+    let content = required_stdin()?;
+    let note = folder.read(id)?;
+    if hash(&note.content) != if_match {
+        return Err(Failure::Conflict);
+    }
+    folder.save(id, &content)
+}
+
+fn move_page(folder: &Folder, id: &str, to: &str) -> Result<Report, Failure> {
+    folder.read(id)?;
+    let target = if to == "/" {
+        ""
+    } else {
+        folder.read(to)?;
+        to
+    };
+    let leaf = id.rsplit('/').next().unwrap_or(id);
+    let new_id = if target.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{target}/{leaf}")
+    };
+    folder.check_names([&new_id])?;
+    let (new_id, moves, _) =
+        notes::move_page(&folder.root, &folder.ignored, id, target).map_err(Failure::Other)?;
+    notes::follow_pins(&folder.root, &moves);
+    Ok(Report {
+        text: format!("{new_id}\n"),
+        json: json!({ "id": new_id }),
+    })
+}
+
 fn run(cli: Cli) -> Result<Report, Failure> {
     let folder = Folder::open(cli.folder)?;
     match cli.command {
         Command::List { under } => list(&folder, under.as_deref()),
         Command::Search { query, limit } => Ok(search(&folder, &query.join(" "), limit)),
         Command::Read { page } => read(&folder, &page),
+        Command::Create { title, under } => create(&folder, &title, under.as_deref()),
+        Command::Append { page } => append(&folder, &page),
+        Command::Edit { page, if_match } => edit(&folder, &page, &if_match),
+        Command::Move { page, to } => move_page(&folder, &page, &to),
     }
 }
 

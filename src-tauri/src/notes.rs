@@ -353,6 +353,23 @@ pub fn after_moves(root: &Path, ignored: &[String], moves: &[Move]) -> Vec<Moved
     moved
 }
 
+/// Points the pinned ids in the folder's settings file at their ids after
+/// `moves`, for writers that do not hold the settings in memory.
+pub fn follow_pins(root: &Path, moves: &[Move]) {
+    let folder = root.to_string_lossy();
+    let mut settings = crate::load_settings(&folder);
+    let Some(pinned) = settings.pinned_note_ids.as_mut() else {
+        return;
+    };
+    let followed: Vec<String> = pinned.iter().map(|id| crate::moved_id(id, moves)).collect();
+    if followed != *pinned {
+        *pinned = followed;
+        if let Err(e) = crate::save_settings(&folder, &settings) {
+            eprintln!("Failed to update pinned pages after a move: {e}");
+        }
+    }
+}
+
 /// Substring search over every page, without the search index: a title that
 /// holds `query` (any case) scores 50, a content line that holds it adds 10
 /// alone or 5 with a title match, and becomes the preview. Best first.
