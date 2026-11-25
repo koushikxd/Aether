@@ -21,6 +21,7 @@ use tokio::io::AsyncWriteExt;
 mod export;
 mod git;
 mod merge;
+mod install;
 pub mod notes;
 mod notion_import;
 mod relink;
@@ -43,7 +44,6 @@ pub struct NoteMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliStatus {
-    pub supported: bool,
     pub installed: bool,
     pub path: Option<String>,
 }
@@ -2900,141 +2900,38 @@ fn check_cli_exists(command_name: &str, path: &str) -> Result<bool, String> {
     Ok(check_output.status.success())
 }
 
-/// Marker comment embedded in CLI wrapper scripts installed by Aether.
-/// Used to identify and validate our own wrapper before modifying or removing it.
-#[cfg(target_os = "macos")]
-const AETHER_CLI_MARKER: &str = "# AETHER_CLI_WRAPPER";
-
-/// Returns the path where the CLI script should be installed (macOS only).
-/// Checks PATH for Homebrew bin first, then falls back to architecture detection.
-/// Apple Silicon: /opt/homebrew/bin/aether
-/// Intel: /usr/local/bin/aether
-#[cfg(target_os = "macos")]
-fn cli_target_path() -> PathBuf {
-    // Check if the user's PATH contains /opt/homebrew/bin (Homebrew on Apple Silicon)
-    if let Ok(path_var) = std::env::var("PATH") {
-        if path_var.split(':').any(|p| p == "/opt/homebrew/bin") {
-            return PathBuf::from("/opt/homebrew/bin/aether");
-        }
-    }
-    // Fall back to architecture detection
-    if std::env::consts::ARCH == "aarch64" {
-        return PathBuf::from("/opt/homebrew/bin/aether");
-    }
-    PathBuf::from("/usr/local/bin/aether")
-}
-
 #[tauri::command]
 fn get_cli_status() -> Result<CliStatus, String> {
-    #[cfg(not(target_os = "macos"))]
-    return Ok(CliStatus { supported: false, installed: false, path: None });
-
-    #[cfg(target_os = "macos")]
-    {
-        let target = cli_target_path();
-        if !target.exists() && target.symlink_metadata().is_err() {
-            return Ok(CliStatus { supported: true, installed: false, path: None });
-        }
-        // Verify this is our wrapper (has marker) and points to the current binary
-        let content = std::fs::read_to_string(&target).unwrap_or_default();
-        if !content.contains(AETHER_CLI_MARKER) {
-            // Foreign binary at this path — don't claim it as ours
-            return Ok(CliStatus { supported: true, installed: false, path: None });
-        }
-        let current_exe = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if !current_exe.is_empty() && !content.contains(&current_exe) {
-            // Our wrapper but points to a moved/deleted binary — needs reinstall
-            return Ok(CliStatus { supported: true, installed: false, path: None });
-        }
-        Ok(CliStatus {
-            supported: true,
-            installed: true,
-            path: Some(target.to_string_lossy().into_owned()),
-        })
-    }
+    let target = install::cli_target()?;
+    let installed = install::bundled_cli().is_ok_and(|cli| install::cli_installed(&target, &cli));
+    Ok(CliStatus {
+        installed,
+        path: installed.then(|| target.to_string_lossy().into_owned()),
+    })
 }
 
 #[tauri::command]
 fn install_cli() -> Result<String, String> {
-    #[cfg(not(target_os = "macos"))]
-    return Err("CLI install is only supported on macOS".to_string());
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let target = cli_target_path();
-
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
-        }
-
-        if target.exists() || target.symlink_metadata().is_ok() {
-            // Only remove if it's our wrapper (contains marker)
-            let content = std::fs::read_to_string(&target).unwrap_or_default();
-            if !content.contains(AETHER_CLI_MARKER) {
-                return Err(format!(
-                    "A different 'aether' command already exists at {}. Remove it manually to install the Aether CLI.",
-                    target.display()
-                ));
-            }
-            std::fs::remove_file(&target)
-                .map_err(|e| format!("Failed to remove existing file: {}", e))?;
-        }
-
-        let exe_path = std::env::current_exe()
-            .map_err(|e| format!("Cannot find exe path: {}", e))?;
-
-        // Shell-escape the exe path using single quotes to prevent
-        // interpretation of $, `, ", and other metacharacters.
-        let exe_str = exe_path.to_string_lossy();
-        let escaped_exe = format!("'{}'", exe_str.replace('\'', "'\\''"));
-
-        // Write a wrapper script that launches the binary in the background so
-        // the terminal is not blocked waiting for the GUI app to exit.
-        let script = format!(
-            "#!/bin/sh\n{}\nnohup {} \"$@\" >/dev/null 2>&1 &\n",
-            AETHER_CLI_MARKER,
-            escaped_exe
-        );
-        std::fs::write(&target, script.as_bytes())
-            .map_err(|e| format!("Failed to write CLI script: {}", e))?;
-
-        let mut perms = std::fs::metadata(&target)
-            .map_err(|e| format!("Failed to read permissions: {}", e))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&target, perms)
-            .map_err(|e| format!("Failed to set permissions: {}", e))?;
-
-        Ok(target.to_string_lossy().into_owned())
-    }
+    let target = install::cli_target()?;
+    install::install_cli(&target, &install::bundled_cli()?)?;
+    Ok(target.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
 fn uninstall_cli() -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    return Ok(());
+    install::uninstall_cli(&install::cli_target()?)
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        let target = cli_target_path();
-        if target.exists() || target.symlink_metadata().is_ok() {
-            let content = std::fs::read_to_string(&target).unwrap_or_default();
-            if !content.contains(AETHER_CLI_MARKER) {
-                return Err(format!(
-                    "File at {} was not installed by Aether. Refusing to remove.",
-                    target.display()
-                ));
-            }
-            std::fs::remove_file(&target)
-                .map_err(|e| format!("Failed to remove CLI script: {}", e))?;
-        }
-        Ok(())
-    }
+#[tauri::command]
+fn get_skill_status() -> Result<install::SkillStatus, String> {
+    let home = dirs::home_dir().ok_or("Cannot find the home folder")?;
+    Ok(install::skill_status(&home))
+}
+
+#[tauri::command]
+fn install_skill() -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("Cannot find the home folder")?;
+    install::install_skill(&home)
 }
 
 #[tauri::command]
@@ -3971,6 +3868,8 @@ pub fn run() {
             install_cli,
             uninstall_cli,
             get_cli_status,
+            get_skill_status,
+            install_skill,
             set_title_bar_theme,
         ])
         .build(tauri::generate_context!())

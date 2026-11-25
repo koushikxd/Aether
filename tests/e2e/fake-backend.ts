@@ -1,6 +1,7 @@
 // Runs in the browser before the app (injected by tests/e2e/app.ts).
 // Fakes the Tauri backend with an in-memory notes folder.
 import { emit } from "@tauri-apps/api/event";
+import { integrationsHandlers } from "./fake-integrations";
 import { mergeHandlers } from "./fake-merge";
 import { vaultHandlers } from "./fake-vault";
 import {
@@ -699,6 +700,7 @@ const handlers: Record<string, Handler> = {
   "plugin:window|close": () => null,
   ...vaultHandlers({ files, writeFile, createBarePageFile }),
   ...mergeHandlers({ files, writeFile, createBarePageFile }),
+  ...integrationsHandlers(),
 };
 
 mockWindows("main");
