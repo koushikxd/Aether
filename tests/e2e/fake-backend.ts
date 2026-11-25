@@ -31,6 +31,8 @@ export interface FakeBackend {
   /** Holds calls to `cmd` (a slow backend) until `release(cmd)` runs them in order. */
   hold: (cmd: string) => void;
   release: (cmd: string) => void;
+  /** Answers only the most recent held call to `cmd`, ahead of earlier ones. */
+  releaseLatest: (cmd: string) => void;
   emit: (event: string, payload: unknown) => Promise<void>;
   /** Birth time `get_note_info` reports for every note (null = the platform has none). */
   noteCreated: number | null;
@@ -585,6 +587,9 @@ const fake: FakeBackend = {
     const waiting = held.get(cmd) ?? [];
     held.delete(cmd);
     waiting.forEach((run) => run());
+  },
+  releaseLatest: (cmd) => {
+    held.get(cmd)?.pop()?.();
   },
   emit,
   // 2026-03-15 12:00 UTC: the same calendar day in every time zone.

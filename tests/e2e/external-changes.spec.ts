@@ -120,6 +120,35 @@ test("in source mode, Refresh right after typing drops the draft instead of savi
   await app.screenshot("external-change-source-refresh");
 });
 
+test("a reload that answers after another note is opened does not replace that note", async ({
+  app,
+}) => {
+  await app.seed({ "Page.md": PAGE, "Other.md": "# Other\n\nOther body\n" });
+  await app.row("Page").click();
+  await expect(app.editor.locator("h1")).toHaveText("Page");
+
+  await app.hold("read_note");
+  const reads = (await app.calls("read_note")).length;
+  await app.writeExternally("Page.md", FROM_CLI);
+  await expect
+    .poll(async () => (await app.calls("read_note")).length)
+    .toBe(reads + 1);
+  await app.row("Other").click();
+  await app.releaseLatest("read_note");
+  await expect(app.editor.locator("h1")).toHaveText("Other");
+
+  await app.release("read_note");
+  await app.page.waitForTimeout(500);
+  await expect(app.editor.locator("h1")).toHaveText("Other");
+  await expect(app.editor).not.toContainText("Added by the CLI");
+  await app.page.waitForTimeout(1000);
+  expect(await app.calls("save_note")).toEqual([]);
+  await app.screenshot("stale-reload-dropped");
+
+  await app.row("Page").click();
+  await expect(app.editor).toContainText("Added by the CLI");
+});
+
 test("pins the CLI writes to the settings file show in the sidebar", async ({
   app,
 }) => {

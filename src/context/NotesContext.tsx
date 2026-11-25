@@ -168,12 +168,15 @@ export function NotesProvider({ children }: { children: ReactNode }) {
 
   const reloadCurrentNote = useCallback(async () => {
     if (!selectedNoteIdRef.current) return;
+    const requestId = selectRequestIdRef.current;
     try {
       const note = await notesService.readNote(selectedNoteIdRef.current);
+      if (requestId !== selectRequestIdRef.current) return;
       setCurrentNote(note);
       setHasExternalChanges(false);
       setReloadVersion((v) => v + 1);
     } catch (err) {
+      if (requestId !== selectRequestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to reload note");
     }
   }, []);

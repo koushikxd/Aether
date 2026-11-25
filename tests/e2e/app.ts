@@ -132,6 +132,14 @@ export class AetherApp {
     await this.page.evaluate((name) => window.aetherFake?.release(name), cmd);
   }
 
+  /** Answers the latest held call to `cmd` while the earlier ones keep waiting. */
+  async releaseLatest(cmd: string) {
+    await this.page.evaluate(
+      (name) => window.aetherFake?.releaseLatest(name),
+      cmd,
+    );
+  }
+
   /** Every backend call so far, optionally filtered by command name. */
   async calls(cmd?: string): Promise<FakeCall[]> {
     const { calls } = await this.state();
