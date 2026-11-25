@@ -261,6 +261,67 @@ fn reading_a_private_page_exits_2_without_naming_it() {
 }
 
 #[test]
+fn a_private_page_stays_unreadable_by_another_spelling_a_sub_folder_or_damaged_marks() {
+    let mut cli = Cli::new(
+        "a_private_page_stays_unreadable_by_another_spelling_a_sub_folder_or_damaged_marks",
+    );
+    let notes = private_fixture();
+    let folder = notes.path().to_str().expect("utf-8 path");
+    let private_text = ["zebra secret", "zebra child", "zebra hidden"];
+    let shows_private = |out: &Output| private_text.iter().any(|t| out.stdout.contains(t));
+
+    for id in [
+        "secret",
+        "SECRET/Child",
+        "Public//Hidden",
+        "Public/./Hidden",
+        "./Secret",
+    ] {
+        let out = cli.run(&["--folder", folder, "--json", "read", id]);
+        assert_ne!(out.code, 0, "{id}: {}", out.stdout);
+        assert!(!shows_private(&out), "{id}: {}", out.stdout);
+    }
+
+    let public = notes.path().join("Public");
+    let public = public.to_str().expect("utf-8 path");
+    for args in [vec!["read", "Hidden"], vec!["list"]] {
+        let out = cli.run(&[&["--folder", public, "--json"], &args[..]].concat());
+        assert_ne!(out.code, 0, "{args:?}: {}", out.stdout);
+        assert!(!out.stdout.contains("Hidden"), "{args:?}: {}", out.stdout);
+    }
+
+    std::fs::write(notes.path().join(".git/aether-vault.json"), [0xff, 0xfe])
+        .expect("damage the marks");
+    for args in [vec!["read", "Secret"], vec!["list"]] {
+        let out = cli.run(&[&["--folder", folder, "--json"], &args[..]].concat());
+        assert_eq!(out.code, 1, "{args:?}: {}", out.stdout);
+        assert!(!out.stdout.contains("Secret"), "{args:?}: {}", out.stdout);
+    }
+}
+
+#[test]
+fn an_edit_whose_heading_cannot_name_a_page_leaves_the_file_alone() {
+    let mut cli = Cli::new("an_edit_whose_heading_cannot_name_a_page_leaves_the_file_alone");
+    let notes = notes_folder(&[("Page.md", "# Page\n")]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run_with(
+        &[
+            "--folder",
+            folder,
+            "--json",
+            "edit",
+            "Page",
+            "--if-match",
+            &sha256_hex("# Page\n"),
+        ],
+        Some("# ..\n\nnew\n"),
+    );
+    assert_ne!(out.code, 0, "{}", out.stdout);
+    assert_eq!(read(notes.path(), "Page.md"), "# Page\n");
+}
+
+#[test]
 fn read_returns_markdown_hash_title_and_public_sub_pages() {
     let mut cli = Cli::new("read_returns_markdown_hash_title_and_public_sub_pages");
     let notes = private_fixture();

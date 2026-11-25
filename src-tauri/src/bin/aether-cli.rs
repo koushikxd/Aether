@@ -172,6 +172,11 @@ impl Folder {
     /// private, and not in an app or ignored folder.
     fn check(&self, id: &str) -> Result<(), Failure> {
         notes::check_id(&self.root, id).map_err(Failure::Invalid)?;
+        if !spelled_as_on_disk(&self.root, &format!("{id}.md"))
+            || !spelled_as_on_disk(&self.root, id)
+        {
+            return Err(Failure::NotFound);
+        }
         if self.is_private(id) {
             return Err(Failure::Unavailable);
         }
@@ -226,17 +231,50 @@ impl Folder {
     }
 }
 
+/// Whether each part of `rel` that exists on disk is spelled exactly as its
+/// entry there. Private marks match exact names, and a case-insensitive file
+/// system, `//`, or `.` would otherwise reach a marked page by another name.
+fn spelled_as_on_disk(root: &Path, rel: &str) -> bool {
+    let mut dir = root.to_path_buf();
+    for part in rel.split('/') {
+        let path = dir.join(part);
+        if path.symlink_metadata().is_err() {
+            return true;
+        }
+        let listed = std::fs::read_dir(&dir)
+            .is_ok_and(|mut entries| entries.any(|e| e.is_ok_and(|e| e.file_name() == part)));
+        if !listed {
+            return false;
+        }
+        dir = path;
+    }
+    true
+}
+
 /// `--folder`, else the nearest ancestor of the current directory holding
 /// `.aether/`, else the notes folder in the app's config.
 fn notes_root(flag: Option<PathBuf>) -> Result<PathBuf, Failure> {
     if let Some(folder) = flag {
-        return folder
+        let folder = folder
             .canonicalize()
             .ok()
             .filter(|f| f.is_dir())
             .ok_or_else(|| {
                 Failure::Other(format!("notes folder not found: {}", folder.display()))
-            });
+            })?;
+        // Its marks live at the notes folder's root, so a page folder would show private pages.
+        if let Some(outer) = folder
+            .ancestors()
+            .skip(1)
+            .find(|d| d.join(".git/aether-vault.json").is_file())
+        {
+            return Err(Failure::Other(format!(
+                "{} is inside the notes folder {}: pass that folder instead",
+                folder.display(),
+                outer.display()
+            )));
+        }
+        return Ok(folder);
     }
     let cwd = std::env::current_dir().map_err(|e| Failure::Other(e.to_string()))?;
     if let Some(dir) = cwd.ancestors().find(|d| d.join(".aether").is_dir()) {

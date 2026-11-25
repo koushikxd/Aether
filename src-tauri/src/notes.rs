@@ -235,10 +235,12 @@ pub fn save(
         });
     };
     let old_path = abs_path_from_id(root, id)?;
-    let target = rename_target(root, ignored, id, content)?;
+    let target = rename_target(root, ignored, id, content)?
+        .map(|(new_id, _)| abs_path_from_id(root, &new_id).map(|path| (new_id, path)))
+        .transpose()?;
     // A rename saves in place first, so a failed rename loses no edits
     std::fs::write(&old_path, content).map_err(|e| e.to_string())?;
-    let Some((new_id, _)) = target else {
+    let Some((new_id, new_path)) = target else {
         let note = saved_note(root, ignored, id, content.to_string(), &old_path)?;
         return Ok(Saved {
             note,
@@ -246,7 +248,6 @@ pub fn save(
             moved: Vec::new(),
         });
     };
-    let new_path = abs_path_from_id(root, &new_id)?;
     let sub_pages = sub_page_dir(root, id, ignored);
     let new_dir = dir_from_id(root, &new_id);
     rename_page(

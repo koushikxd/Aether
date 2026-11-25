@@ -337,7 +337,8 @@ fn load(root: &Path) -> Result<Local, String> {
     match fs::read_to_string(local_path(root)) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|_| "This device's private pages state is damaged".to_string()),
-        Err(_) => Ok(Local::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Local::default()),
+        Err(_) => Err("This device's private pages state could not be read".to_string()),
     }
 }
 
