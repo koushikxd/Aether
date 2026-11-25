@@ -45,6 +45,7 @@ rand = "0.9"
 sha2 = "0.11"
 keyring = "4"
 clap = { version = "4.6.10", features = ["derive"] }
+dirs = "7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = [

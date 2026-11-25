@@ -5,14 +5,45 @@
 
 use crate::{
     abs_path_from_id, bare_page_markdown, create_bare_page_file, dir_from_id, extract_title,
-    generate_preview, id_from_abs_path, is_hidden_dir, is_visible_notes_entry, modified_secs,
-    note_name_taken, parent_folder, relink, remove_empty_sub_page_dir, rename_page,
-    sanitize_filename, sub_page_dir, validate_folder_path, vault, Note, NoteMetadata, SearchResult,
+    generate_preview, get_effective_ignored_dirs, id_from_abs_path, is_hidden_dir,
+    is_visible_notes_entry, modified_secs, note_name_taken, parent_folder, relink,
+    remove_empty_sub_page_dir, rename_page, sanitize_filename, sub_page_dir, validate_folder_path,
+    vault, Note, NoteMetadata, SearchResult,
 };
 use std::collections::HashSet;
 use std::path::Path;
 
 pub use crate::relink::{Move, Moved};
+pub use crate::vault::PrivateSet;
+
+/// The folder names the user chose to ignore, from the folder's settings
+/// file, without creating it.
+pub fn ignored_dirs(root: &Path) -> Vec<String> {
+    let settings = std::fs::read_to_string(root.join(".aether").join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    get_effective_ignored_dirs(&settings)
+}
+
+/// The private pages, their sub-pages, and the assets only they use, from
+/// this device's marks. Needs no key.
+pub fn private_set(root: &Path, ignored: &[String]) -> Result<PrivateSet, String> {
+    vault::current_private_set(root, ignored)
+}
+
+/// Checks that `id` is a note id inside the notes folder (no `..`, no
+/// absolute path, no backslash).
+pub fn check_id(root: &Path, id: &str) -> Result<(), String> {
+    abs_path_from_id(root, id).map(|_| ())
+}
+
+/// Whether `id` sits in an app or ignored folder, where no page is listed.
+pub fn in_hidden_folder(ignored: &[String], id: &str) -> bool {
+    parent_folder(id)
+        .split('/')
+        .any(|dir| is_hidden_dir(dir, ignored))
+}
 
 /// A saved page, and the renames the save made (empty when it kept its name).
 pub struct Saved {

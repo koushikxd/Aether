@@ -11,6 +11,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "clap",
+ "dirs",
  "ego-tree",
  "keyring",
  "notify",
