@@ -597,6 +597,13 @@ fn generate_preview(content: &str) -> String {
     String::new()
 }
 
+static IMAGE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"!\[([^\]]*)\]\([^)]+\)").unwrap());
+static LINK_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
+static LIST_MARKER_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^(\s*[-+*]|\s*\d+\.)\s+").unwrap());
+
 // Strip common markdown formatting from text
 fn strip_markdown(text: &str) -> String {
     let mut result = text.to_string();
@@ -646,12 +653,10 @@ fn strip_markdown(text: &str) -> String {
     }
 
     // Remove images ![alt](url) - must come before links
-    let img_re = regex::Regex::new(r"!\[([^\]]*)\]\([^)]+\)").unwrap();
-    result = img_re.replace_all(&result, "$1").to_string();
+    result = IMAGE_RE.replace_all(&result, "$1").to_string();
 
     // Remove links [text](url)
-    let link_re = regex::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap();
-    result = link_re.replace_all(&result, "$1").to_string();
+    result = LINK_RE.replace_all(&result, "$1").to_string();
 
     // Remove italic (*text* or _text_) - simple approach after bold is removed
     // Match *text* where text doesn't contain *
@@ -688,8 +693,7 @@ fn strip_markdown(text: &str) -> String {
         .replace("- [X] ", "");
 
     // Remove list markers at start (-, *, +, 1.)
-    let list_re = regex::Regex::new(r"^(\s*[-+*]|\s*\d+\.)\s+").unwrap();
-    result = list_re.replace(&result, "").to_string();
+    result = LIST_MARKER_RE.replace(&result, "").to_string();
 
     result.trim().to_string()
 }
