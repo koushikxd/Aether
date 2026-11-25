@@ -298,7 +298,8 @@ mod tests {
     fn the_appimage_refuses_to_install_the_cli() {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("Aether");
-        fs::write(exe.with_file_name("aether-cli"), "cli").unwrap();
+        let cli = format!("aether-cli{}", std::env::consts::EXE_SUFFIX);
+        fs::write(exe.with_file_name(cli), "cli").unwrap();
         assert!(cli_beside(&exe, false).is_ok());
 
         let err = cli_beside(&exe, true).unwrap_err();

@@ -43,6 +43,7 @@ impl Cli {
         self.run_program_with(Path::new(env!("CARGO_BIN_EXE_aether-cli")), args, stdin)
     }
 
+    #[cfg(unix)]
     fn run_program(&mut self, program: &Path, args: &[&str]) -> Output {
         self.run_program_with(program, args, None)
     }
@@ -54,7 +55,6 @@ impl Cli {
             .current_dir(&self.cwd)
             .env("HOME", home)
             .env("XDG_DATA_HOME", home.join(".local/share"))
-            .env("APPDATA", home.join("AppData/Roaming"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -499,6 +499,10 @@ fn search_ranks_title_matches_first_and_shows_the_matching_line() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows finds the app config through the OS, which a test cannot point at a temp home"
+)]
 fn the_notes_folder_comes_from_the_flag_then_the_cwd_then_the_app_config() {
     let mut cli = Cli::new("the_notes_folder_comes_from_the_flag_then_the_cwd_then_the_app_config");
     let flag = notes_folder(&[("FromFlag.md", "# FromFlag\n")]);
@@ -511,8 +515,6 @@ fn the_notes_folder_comes_from_the_flag_then_the_cwd_then_the_app_config() {
     let identifier = conf["identifier"].as_str().expect("identifier");
     let data_dir = if cfg!(target_os = "macos") {
         cli.home.path().join("Library/Application Support")
-    } else if cfg!(windows) {
-        cli.home.path().join("AppData/Roaming")
     } else {
         cli.home.path().join(".local/share")
     };
@@ -541,6 +543,10 @@ fn the_notes_folder_comes_from_the_flag_then_the_cwd_then_the_app_config() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows finds the app config through the OS, which a test cannot point at a temp home"
+)]
 fn no_notes_folder_is_an_error() {
     let mut cli = Cli::new("no_notes_folder_is_an_error");
     let out = cli.run(&["--json", "list"]);
