@@ -1515,6 +1515,11 @@ export function Editor({
         lastReloadVersionRef.current = reloadVersion;
         loadedModifiedRef.current = currentNote.modified;
         heldRef.current = false;
+        // A pending source-mode save holds the draft Refresh just dropped
+        if (sourceTimeoutRef.current) {
+          clearTimeout(sourceTimeoutRef.current);
+          sourceTimeoutRef.current = null;
+        }
         setSourceContent(currentNote.content);
         isLoadingRef.current = true;
         const { from, to } = editor.state.selection;

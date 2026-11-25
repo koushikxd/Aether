@@ -93,6 +93,33 @@ test("in source mode, an external change with no pending edits reloads the sourc
   );
 });
 
+test("in source mode, Refresh right after typing drops the draft instead of saving it later", async ({
+  app,
+}) => {
+  await app.page.clock.install();
+  await openPage(app);
+  await app.page.evaluate(() =>
+    window.dispatchEvent(new Event("toggle-source-mode")),
+  );
+  const source = app.page.locator("textarea");
+  await expect(source).toHaveValue(/Body/);
+
+  // Freeze time so the 300 ms source autosave is still pending at Refresh
+  await app.page.clock.pauseAt(
+    await app.page.evaluate(() => Date.now() + 1000),
+  );
+  await source.press("End");
+  await source.pressSequentially(" mine");
+  await app.writeExternally("Page.md", FROM_CLI);
+  await app.page.getByRole("button", { name: "Refresh" }).click();
+  await expect(source).toHaveValue(/Added by the CLI/);
+
+  await app.page.clock.runFor(1000);
+  expect(await app.calls("save_note")).toEqual([]);
+  expect(await app.file("Page.md")).toBe(FROM_CLI);
+  await app.screenshot("external-change-source-refresh");
+});
+
 test("pins the CLI writes to the settings file show in the sidebar", async ({
   app,
 }) => {
