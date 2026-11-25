@@ -100,3 +100,24 @@ test("an empty svg block opens in source mode", async ({ app }) => {
     app.editor.getByRole("button", { name: "Preview" }),
   ).toBeVisible();
 });
+
+test("switching notes opens each svg block in its own default mode", async ({
+  app,
+}) => {
+  await app.seed({
+    "Filled.md": `# Filled\n\n\`\`\`svg\n${RED_SQUARE}\n\`\`\`\n`,
+    "Empty.md": "# Empty\n\n```svg\n```\n",
+  });
+  await app.open("Filled");
+  await expectLoaded(app);
+
+  await app.open("Empty");
+  await expect(app.editor.locator("h1")).toHaveText("Empty");
+  await expect(source(app)).toBeVisible();
+  await expect(preview(app)).toHaveCount(0);
+
+  await app.open("Filled");
+  await expect(app.editor.locator("h1")).toHaveText("Filled");
+  await expectLoaded(app);
+  await expect(source(app)).toHaveCount(0);
+});
