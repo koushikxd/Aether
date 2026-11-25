@@ -53,6 +53,7 @@ Notes open in tabs shown in the editor header. A plain open replaces the active 
 - Code blocks have syntax highlighting. Mermaid blocks render as diagrams. KaTeX renders math.
 - Wikilinks: type `[[` to link to another note with autocomplete.
 - Images can be pasted, dropped in, and resized. Other files show as file cards.
+- When the open note changes on disk (the CLI or another app), the editor reloads it and keeps the cursor. If the editor has unsaved edits, it shows Refresh and Overwrite instead, and saves nothing until you pick one or open another note.
 - Find in note (`Cmd+F`) and focus mode (`Cmd+Shift+Enter`), which fades the sidebar and toolbar.
 - The Info button next to Export in the editor header shows the note's last modified date, created date (hidden when the system does not record it, common on Linux), word and character count, and path relative to the notes folder. Click the path to copy it. Not shown in the preview window.
 
@@ -109,14 +110,20 @@ Edit the current note with a local CLI: Claude Code, OpenAI Codex, OpenCode, or 
 ## Preview mode and CLI
 
 - Opening a `.md` file from outside the notes folder (drag-and-drop or "Open With") shows it in a standalone preview window, which can save it into the notes folder.
-- On macOS, Settings, Integrations can install an `aether` shell command. `aether .` opens a folder as the notes folder.
+- Settings, Integrations, Install CLI Tool puts an `aether` command on PATH on macOS, Windows, and Linux. It works with the app closed. `aether --help` lists every command.
+  - `list`, `search`, `read`, and `check` find and read pages. `create`, `append`, `edit`, and `move` change them. There is no delete. `--json` prints one JSON object, errors included.
+  - The notes folder is `--folder`, else the nearest folder above the current directory that holds `.aether/`, else the folder open in the app.
+  - Private pages do not exist for the CLI. A command that touches one fails with `path unavailable` and names nothing.
+  - `read` prints a hash. `edit` needs it as `--if-match <hash>` and fails with exit code 3 if the page changed since. A new first heading renames the page and rewrites links, as in the app. Moves and renames keep pins.
+  - `aether .` or `aether open <folder>` opens a folder as the notes folder. `aether note.md` opens a note. `aether` alone starts the app.
+- Install Agent Skill writes a skill that teaches agents to use the CLI when you ask them to work with your notes, to `~/.claude/skills/aether/` (Claude Code) and `~/.agents/skills/aether/` (Codex and other agents). The button reads Update Agent Skill when an installed copy differs from this version of Aether.
 
 ## Settings
 
 Tabs: Folder (`Cmd+1`), Integrations (`Cmd+2`), Appearance (`Cmd+3`), Shortcuts (`Cmd+4`), About (`Cmd+5`).
 
 - Folder: folder location, export and import, version control, private pages, default note name, ignored folders.
-- Integrations: AI providers and the CLI tool.
+- Integrations: AI providers, the CLI tool, and the agent skill.
 - Appearance: light, dark, or system theme with custom colors, typography (font, size, bold weight, line height), page width, and text direction (including RTL).
 
 ## Keyboard shortcuts
