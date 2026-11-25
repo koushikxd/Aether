@@ -9,7 +9,8 @@ use aether_lib::notes::{self, PrivateSet};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// The app's bundle identifier, which names its data folder (`tauri.conf.json`).
@@ -36,11 +37,23 @@ struct Cli {
     json: bool,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(flatten)]
+    Page(PageCommand),
+    /// Open a folder (as the notes folder) or a .md file in the app. `aether
+    /// <path>` does the same, and `aether` alone starts the app
+    Open { path: PathBuf },
+    #[command(external_subcommand)]
+    Path(Vec<OsString>),
+}
+
+/// The commands that work on the notes folder.
+#[derive(Subcommand)]
+enum PageCommand {
     /// List pages with their ids and titles
     List {
         /// Only the sub-pages of this page, at every depth
@@ -539,17 +552,102 @@ fn check(folder: &Folder) -> Result<Report, Failure> {
     Ok(Report { json, text })
 }
 
+/// The app's executable, next to the real CLI binary (inside the bundle on
+/// macOS), whatever symlink on PATH started it.
+fn app_executable() -> Result<PathBuf, Failure> {
+    let cli = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .map_err(|e| Failure::Other(format!("could not find the aether binary: {e}")))?;
+    let names: &[&str] = if cfg!(windows) {
+        &["Aether.exe"]
+    } else {
+        &["Aether", "aether"]
+    };
+    let dir = cli.parent().unwrap_or(Path::new(""));
+    names
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|app| app.is_file() && app.canonicalize().is_ok_and(|a| a != cli))
+        .ok_or_else(|| {
+            Failure::Other(format!(
+                "could not find the Aether app in {}",
+                dir.display()
+            ))
+        })
+}
+
+/// Starts the app with `path` (none: just the app), detached from this
+/// terminal. A running app gets the path through its single-instance handler.
+fn open(path: Option<&Path>) -> Result<Report, Failure> {
+    let path = path
+        .map(|p| {
+            p.canonicalize()
+                .map_err(|_| Failure::Invalid(format!("no such file or folder: {}", p.display())))
+        })
+        .transpose()?;
+    let mut app = std::process::Command::new(app_executable()?);
+    app.args(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut app, 0);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        app.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    app.spawn()
+        .map_err(|e| Failure::Other(format!("could not start the Aether app: {e}")))?;
+    let opened = path.as_deref().map(|p| p.display().to_string());
+    Ok(Report {
+        text: opened
+            .as_ref()
+            .map_or(String::new(), |p| format!("opening {p}\n")),
+        json: json!({ "opened": opened }),
+    })
+}
+
+/// `aether <path>`: opens `path` when it exists. Anything else is a typo'd command.
+fn open_bare(args: &[OsString]) -> Result<Report, Failure> {
+    let [path] = args else {
+        let first = args
+            .first()
+            .map(|a| a.to_string_lossy())
+            .unwrap_or_default();
+        return Err(Failure::Invalid(format!(
+            "unknown command: {first} (see aether --help)"
+        )));
+    };
+    let path = Path::new(path);
+    if !path.exists() {
+        return Err(Failure::Invalid(format!(
+            "unknown command or path: {} (see aether --help)",
+            path.display()
+        )));
+    }
+    open(Some(path))
+}
+
 fn run(cli: Cli) -> Result<Report, Failure> {
+    let command = match cli.command {
+        None => return open(None),
+        Some(Command::Open { path }) => return open(Some(&path)),
+        Some(Command::Path(args)) => return open_bare(&args),
+        Some(Command::Page(command)) => command,
+    };
     let folder = Folder::open(cli.folder)?;
-    match cli.command {
-        Command::List { under } => list(&folder, under.as_deref()),
-        Command::Search { query, limit } => Ok(search(&folder, &query.join(" "), limit)),
-        Command::Read { page } => read(&folder, &page),
-        Command::Check => check(&folder),
-        Command::Create { title, under } => create(&folder, &title, under.as_deref()),
-        Command::Append { page } => append(&folder, &page),
-        Command::Edit { page, if_match } => edit(&folder, &page, &if_match),
-        Command::Move { page, to } => move_page(&folder, &page, &to),
+    match command {
+        PageCommand::List { under } => list(&folder, under.as_deref()),
+        PageCommand::Search { query, limit } => Ok(search(&folder, &query.join(" "), limit)),
+        PageCommand::Read { page } => read(&folder, &page),
+        PageCommand::Check => check(&folder),
+        PageCommand::Create { title, under } => create(&folder, &title, under.as_deref()),
+        PageCommand::Append { page } => append(&folder, &page),
+        PageCommand::Edit { page, if_match } => edit(&folder, &page, &if_match),
+        PageCommand::Move { page, to } => move_page(&folder, &page, &to),
     }
 }
 

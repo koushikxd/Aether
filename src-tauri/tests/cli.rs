@@ -39,8 +39,16 @@ impl Cli {
     }
 
     fn run_with(&mut self, args: &[&str], stdin: Option<&str>) -> Output {
+        self.run_program_with(Path::new(env!("CARGO_BIN_EXE_aether-cli")), args, stdin)
+    }
+
+    fn run_program(&mut self, program: &Path, args: &[&str]) -> Output {
+        self.run_program_with(program, args, None)
+    }
+
+    fn run_program_with(&mut self, program: &Path, args: &[&str], stdin: Option<&str>) -> Output {
         let home = self.home.path();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_aether-cli"))
+        let mut child = Command::new(program)
             .args(args)
             .current_dir(&self.cwd)
             .env("HOME", home)
@@ -752,16 +760,118 @@ fn check_reports_each_problem_once_and_nothing_private() {
         ("Renamed", "title_mismatch"),
         ("Wiki", "links_to_unavailable_page"),
     ];
-    let expected: Vec<(String, String)> =
-        expected.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let expected: Vec<(String, String)> = expected
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
     assert_eq!(problems, expected);
     assert!(out.stdout.contains("Missing.md") && out.stdout.contains("assets/nothing.png"));
-    assert!(out.stdout.contains("links to an unavailable page"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("links to an unavailable page"),
+        "{}",
+        out.stdout
+    );
 
     let text = cli.run(&["--folder", folder, "check"]);
     for out in [&out, &text] {
         for private in ["Secret", "Child", "Nowhere"] {
-            assert!(!out.stdout.contains(private), "{private} leaked: {}", out.stdout);
+            assert!(
+                !out.stdout.contains(private),
+                "{private} leaked: {}",
+                out.stdout
+            );
         }
     }
+}
+
+/// A copy of the CLI next to a fake `Aether` app that writes the arguments
+/// it was started with to `opened.txt`, reached through a symlink on a
+/// fake PATH as the install makes it.
+#[cfg(unix)]
+struct FakeInstall {
+    dir: TempDir,
+}
+
+#[cfg(unix)]
+impl FakeInstall {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("create install dir");
+        let bundle = dir.path().join("bundle");
+        std::fs::create_dir_all(&bundle).expect("create bundle dir");
+        std::fs::copy(env!("CARGO_BIN_EXE_aether-cli"), bundle.join("aether-cli"))
+            .expect("copy cli");
+        let app = bundle.join("Aether");
+        // One line per argument, moved into place once written.
+        let script = r#"#!/bin/sh
+d=$(dirname "$0")
+for a in "$@"; do echo "$a"; done > "$d/opened.tmp"
+mv "$d/opened.tmp" "$d/opened.txt"
+"#;
+        std::fs::write(&app, script).expect("write fake app");
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::create_dir_all(dir.path().join("bin")).expect("create bin dir");
+        std::os::unix::fs::symlink(bundle.join("aether-cli"), dir.path().join("bin/aether"))
+            .expect("symlink cli");
+        Self { dir }
+    }
+
+    fn cli(&self) -> PathBuf {
+        self.dir.path().join("bin/aether")
+    }
+
+    /// The arguments the fake app got, once it has run.
+    fn opened(&self) -> Vec<String> {
+        let file = self.dir.path().join("bundle/opened.txt");
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                std::fs::remove_file(&file).expect("remove opened.txt");
+                return text.lines().map(str::to_string).collect();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the fake app never ran");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn open_and_a_bare_path_start_the_app_with_the_path() {
+    let mut cli = Cli::new("open_and_a_bare_path_start_the_app_with_the_path");
+    let install = FakeInstall::new();
+    let notes = notes_folder(&[("Page.md", "# Page\n")]);
+    let root = notes.path().canonicalize().expect("canonical notes folder");
+    cli.cwd = root.clone();
+    let page = root.join("Page.md");
+
+    let out = cli.run_program(&install.cli(), &["open", "."]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(install.opened(), [root.to_str().expect("utf-8")]);
+
+    let out = cli.run_program(&install.cli(), &["."]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(install.opened(), [root.to_str().expect("utf-8")]);
+
+    let out = cli.run_program(&install.cli(), &["Page.md"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(install.opened(), [page.to_str().expect("utf-8")]);
+
+    let out = cli.run_program(&install.cli(), &[]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(install.opened().is_empty());
+
+    let out = cli.run_program(&install.cli(), &["--json", "nonsense"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(json(&out)["error"]["code"], "invalid");
+}
+
+#[test]
+fn a_command_name_wins_over_a_folder_with_that_name() {
+    let mut cli = Cli::new("a_command_name_wins_over_a_folder_with_that_name");
+    let notes = notes_folder(&[("Page.md", "# Page\n"), ("list/Inner.md", "# Inner\n")]);
+    cli.cwd = notes.path().to_path_buf();
+
+    let out = cli.run(&["--json", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(ids(&json(&out), "pages"), ["Page", "list", "list/Inner"]);
 }
