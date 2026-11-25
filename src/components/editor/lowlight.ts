@@ -39,6 +39,7 @@ lowlight.register("sql", sql);
 lowlight.register("css", css);
 lowlight.register("html", xml);
 lowlight.register("xml", xml);
+lowlight.register("svg", xml);
 lowlight.register("bash", bash);
 lowlight.register("sh", bash);
 lowlight.register("shell", bash);
@@ -85,4 +86,5 @@ export const SUPPORTED_LANGUAGES = [
   { value: "diff", label: "Diff" },
   { value: "dockerfile", label: "Dockerfile" },
   { value: "mermaid", label: "Mermaid" },
+  { value: "svg", label: "SVG" },
 ];
