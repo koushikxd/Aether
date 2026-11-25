@@ -155,7 +155,7 @@ struct Folder {
 impl Folder {
     fn open(flag: Option<PathBuf>) -> Result<Self, Failure> {
         let root = notes_root(flag)?;
-        let root = root.canonicalize().unwrap_or(root);
+        let root = dunce::canonicalize(&root).unwrap_or(root);
         // Marks live at the notes folder's root, so a folder inside one would show its private pages.
         if let Some(outer) = root
             .ancestors()
@@ -302,8 +302,7 @@ fn spelled_as_on_disk(root: &Path, rel: &str) -> bool {
 /// `.aether/`, else the notes folder in the app's config.
 fn notes_root(flag: Option<PathBuf>) -> Result<PathBuf, Failure> {
     if let Some(folder) = flag {
-        return folder
-            .canonicalize()
+        return dunce::canonicalize(&folder)
             .ok()
             .filter(|f| f.is_dir())
             .ok_or_else(|| {
@@ -683,7 +682,7 @@ fn app_executable() -> Result<PathBuf, Failure> {
 fn open(path: Option<&Path>) -> Result<Report, Failure> {
     let path = path
         .map(|p| {
-            p.canonicalize()
+            dunce::canonicalize(p)
                 .map_err(|_| Failure::Invalid(format!("no such file or folder: {}", p.display())))
         })
         .transpose()?;

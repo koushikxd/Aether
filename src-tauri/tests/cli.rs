@@ -288,6 +288,10 @@ fn a_private_page_stays_unreadable_by_another_spelling_a_sub_folder_or_damaged_m
         let out = cli.run(&[&["--folder", public, "--json"], &args[..]].concat());
         assert_ne!(out.code, 0, "{args:?}: {}", out.stdout);
         assert!(!out.stdout.contains("Hidden"), "{args:?}: {}", out.stdout);
+        // Windows paths as people type them, not the \\?\ form canonicalize gives
+        let error = json(&out);
+        let message = error["error"]["message"].as_str().expect("error message");
+        assert!(!message.contains(r"\\?\"), "{message}");
     }
 
     std::fs::write(notes.path().join(".git/aether-vault.json"), [0xff, 0xfe])

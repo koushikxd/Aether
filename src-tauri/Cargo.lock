@@ -12,6 +12,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "dunce",
  "ego-tree",
  "keyring",
  "notify",

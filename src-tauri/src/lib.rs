@@ -3630,7 +3630,7 @@ fn handle_cli_args(app: &AppHandle, args: &[String], cwd: &str) -> bool {
                 opened_preview = true;
             }
         } else if path.is_dir() {
-            let canonical = path.canonicalize().unwrap_or(path.clone());
+            let canonical = dunce::canonicalize(&path).unwrap_or(path.clone());
             let state = app.state::<AppState>();
             // Full initialization: directory creation, write-access check,
             // asset-scope update, config/settings persist, and search-index rebuild
