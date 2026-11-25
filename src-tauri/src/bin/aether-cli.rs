@@ -155,6 +155,19 @@ struct Folder {
 impl Folder {
     fn open(flag: Option<PathBuf>) -> Result<Self, Failure> {
         let root = notes_root(flag)?;
+        let root = root.canonicalize().unwrap_or(root);
+        // Marks live at the notes folder's root, so a folder inside one would show its private pages.
+        if let Some(outer) = root
+            .ancestors()
+            .skip(1)
+            .find(|d| d.join(".git/aether-vault.json").is_file())
+        {
+            return Err(Failure::Other(format!(
+                "{} is inside the notes folder {}: use that folder instead",
+                root.display(),
+                outer.display()
+            )));
+        }
         let ignored = notes::ignored_dirs(&root);
         let private = notes::private_set(&root, &ignored).map_err(Failure::Other)?;
         Ok(Folder {
@@ -164,8 +177,27 @@ impl Folder {
         })
     }
 
+    /// Whether `id` is marked private, directly or through a symlink to a marked page.
     fn is_private(&self, id: &str) -> bool {
+        self.marked(id)
+            || self
+                .real_id(id)
+                .is_some_and(|real| real != id && self.marked(&real))
+    }
+
+    fn marked(&self, id: &str) -> bool {
         self.private.contains(&format!("{id}.md")) || self.private.contains_dir(id)
+    }
+
+    /// The page id that `id` resolves to through symlinks, when it stays in the notes folder.
+    fn real_id(&self, id: &str) -> Option<String> {
+        let file = self.root.join(format!("{id}.md")).canonicalize();
+        let (real, suffix) = match file {
+            Ok(real) => (real, ".md"),
+            Err(_) => (self.root.join(id).canonicalize().ok()?, ""),
+        };
+        let rel = real.strip_prefix(&self.root).ok()?.to_str()?;
+        Some(rel.strip_suffix(suffix)?.replace('\\', "/"))
     }
 
     /// Checks page id `id` names a public page that can exist: valid, not
@@ -255,26 +287,13 @@ fn spelled_as_on_disk(root: &Path, rel: &str) -> bool {
 /// `.aether/`, else the notes folder in the app's config.
 fn notes_root(flag: Option<PathBuf>) -> Result<PathBuf, Failure> {
     if let Some(folder) = flag {
-        let folder = folder
+        return folder
             .canonicalize()
             .ok()
             .filter(|f| f.is_dir())
             .ok_or_else(|| {
                 Failure::Other(format!("notes folder not found: {}", folder.display()))
-            })?;
-        // Its marks live at the notes folder's root, so a page folder would show private pages.
-        if let Some(outer) = folder
-            .ancestors()
-            .skip(1)
-            .find(|d| d.join(".git/aether-vault.json").is_file())
-        {
-            return Err(Failure::Other(format!(
-                "{} is inside the notes folder {}: pass that folder instead",
-                folder.display(),
-                outer.display()
-            )));
-        }
-        return Ok(folder);
+            });
     }
     let cwd = std::env::current_dir().map_err(|e| Failure::Other(e.to_string()))?;
     if let Some(dir) = cwd.ancestors().find(|d| d.join(".aether").is_dir()) {

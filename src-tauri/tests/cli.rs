@@ -299,6 +299,67 @@ fn a_private_page_stays_unreadable_by_another_spelling_a_sub_folder_or_damaged_m
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_private_page_or_a_nested_notes_folder_reaches_nothing_private() {
+    use std::os::unix::fs::symlink;
+    let mut cli =
+        Cli::new("a_symlink_to_a_private_page_or_a_nested_notes_folder_reaches_nothing_private");
+    let notes = private_fixture();
+    let folder = notes.path().to_str().expect("utf-8 path");
+    symlink(
+        notes.path().join("Secret.md"),
+        notes.path().join("Alias.md"),
+    )
+    .expect("link page");
+    symlink(notes.path().join("Secret"), notes.path().join("Linked")).expect("link folder");
+
+    for args in [
+        vec!["list"],
+        vec!["search", "zebra"],
+        vec!["read", "Alias"],
+        vec!["read", "Linked/Child"],
+    ] {
+        let out = cli.run(&[&["--folder", folder, "--json"], &args[..]].concat());
+        assert!(
+            !out.stdout.contains("zebra secret"),
+            "{args:?}: {}",
+            out.stdout
+        );
+        assert!(
+            !out.stdout.contains("zebra child"),
+            "{args:?}: {}",
+            out.stdout
+        );
+        assert!(!out.stdout.contains("Alias"), "{args:?}: {}", out.stdout);
+        assert!(!out.stdout.contains("Linked"), "{args:?}: {}", out.stdout);
+    }
+
+    // A notes folder the app once opened inside this one
+    std::fs::create_dir_all(notes.path().join("Public/.aether")).expect("nested .aether");
+    cli.cwd = notes.path().join("Public");
+    let out = cli.run(&["--json", "read", "Hidden"]);
+    assert_ne!(out.code, 0, "{}", out.stdout);
+    assert!(!out.stdout.contains("zebra hidden"), "{}", out.stdout);
+}
+
+#[test]
+fn a_notes_folder_whose_git_is_a_pointer_file_still_works() {
+    let mut cli = Cli::new("a_notes_folder_whose_git_is_a_pointer_file_still_works");
+    let notes = TempDir::new().expect("create notes folder");
+    write(
+        notes.path(),
+        ".git",
+        "gitdir: /elsewhere/.git/worktrees/notes\n",
+    );
+    write(notes.path(), "Page.md", "# Page\n");
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&["--folder", folder, "--json", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(ids(&json(&out), "pages"), ["Page"]);
+}
+
 #[test]
 fn an_edit_whose_heading_cannot_name_a_page_leaves_the_file_alone() {
     let mut cli = Cli::new("an_edit_whose_heading_cannot_name_a_page_leaves_the_file_alone");

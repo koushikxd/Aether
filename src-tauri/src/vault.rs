@@ -337,7 +337,10 @@ fn load(root: &Path) -> Result<Local, String> {
     match fs::read_to_string(local_path(root)) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|_| "This device's private pages state is damaged".to_string()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Local::default()),
+        // No store: no marks yet, or `.git` is a worktree or submodule pointer file
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || !root.join(".git").is_dir() => {
+            Ok(Local::default())
+        }
         Err(_) => Err("This device's private pages state could not be read".to_string()),
     }
 }
