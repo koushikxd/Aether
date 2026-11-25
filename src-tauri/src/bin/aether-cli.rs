@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 /// The app's bundle identifier, which names its data folder (`tauri.conf.json`).
 const APP_IDENTIFIER: &str = "com.aether.app";
@@ -375,15 +376,38 @@ fn written(note: &aether_lib::Note) -> Report {
     }
 }
 
+/// How long stdin may stay open with nothing on it. Some agent shells leave
+/// it open and never write, and reading would wait forever.
+const STDIN_WAIT: Duration = Duration::from_secs(5);
+
+/// All of stdin, or nothing from a terminal.
 fn stdin() -> Result<String, Failure> {
     use std::io::{IsTerminal, Read};
-    let mut text = String::new();
-    if !std::io::stdin().is_terminal() {
-        std::io::stdin()
-            .read_to_string(&mut text)
-            .map_err(|e| Failure::Other(format!("could not read stdin: {e}")))?;
+    if std::io::stdin().is_terminal() {
+        return Ok(String::new());
     }
-    Ok(text)
+    let (started, first_read) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut bytes = Vec::new();
+        let first = stdin.by_ref().take(1).read_to_end(&mut bytes);
+        let _ = started.send(());
+        first
+            .and_then(|_| stdin.read_to_end(&mut bytes))
+            .map(|_| bytes)
+    });
+    if first_read.recv_timeout(STDIN_WAIT).is_err() {
+        return Err(Failure::Invalid(format!(
+            "nothing arrived on stdin in {} seconds: pipe the markdown in, or for a page with no body use < /dev/null",
+            STDIN_WAIT.as_secs()
+        )));
+    }
+    let bytes = reader
+        .join()
+        .map_err(|_| Failure::Other("could not read stdin".to_string()))?
+        .map_err(|e| Failure::Other(format!("could not read stdin: {e}")))?;
+    String::from_utf8(bytes)
+        .map_err(|_| Failure::Other("could not read stdin: it is not UTF-8".to_string()))
 }
 
 /// stdin, which must hold something.

@@ -5,6 +5,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 struct Output {
@@ -66,6 +67,36 @@ impl Cli {
             }
         }
         let out = child.wait_with_output().expect("wait for aether-cli");
+        self.record(args, stdin.unwrap_or(""), out)
+    }
+
+    /// Runs with stdin left open and never written, as some agent shells
+    /// leave it. Kills the CLI if it is still waiting after 30 seconds.
+    fn run_with_idle_stdin(&mut self, args: &[&str]) -> Output {
+        let home = self.home.path();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_aether-cli"))
+            .args(args)
+            .current_dir(&self.cwd)
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run aether-cli");
+        let _idle = child.stdin.take();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while child.try_wait().expect("poll aether-cli").is_none() {
+            if Instant::now() > deadline {
+                child.kill().expect("kill aether-cli");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let out = child.wait_with_output().expect("wait for aether-cli");
+        self.record(args, "(open, nothing written)", out)
+    }
+
+    fn record(&mut self, args: &[&str], stdin: &str, out: std::process::Output) -> Output {
         let output = Output {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -75,7 +106,7 @@ impl Cli {
             "$ aether {}\n--- cwd\n{}\n--- stdin\n{}\n--- stdout\n{}\n--- stderr\n{}\n--- exit {}\n\n",
             args.join(" "),
             self.cwd.display(),
-            stdin.unwrap_or(""),
+            stdin,
             output.stdout,
             output.stderr,
             output.code
@@ -434,6 +465,35 @@ fn create_writes_a_page_at_the_root_or_under_a_parent() {
     ]);
     assert_eq!(out.code, 2);
     assert_eq!(json(&out)["error"]["code"], "not_found");
+}
+
+#[test]
+fn create_append_and_edit_fail_when_stdin_stays_open_with_nothing_on_it() {
+    let mut cli = Cli::new("create_append_and_edit_fail_when_stdin_stays_open_with_nothing_on_it");
+    let notes = notes_folder(&[("Page.md", "# Page\n")]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+    let hash = sha256_hex("# Page\n");
+
+    for args in [
+        vec!["create", "Empty"],
+        vec!["append", "Page"],
+        vec!["edit", "Page", "--if-match", &hash],
+    ] {
+        let started = Instant::now();
+        let out = cli.run_with_idle_stdin(&[&["--folder", folder, "--json"], &args[..]].concat());
+        assert!(started.elapsed() < Duration::from_secs(20), "{args:?} hung");
+        assert_eq!(out.code, 1, "{args:?}: {}", out.stderr);
+        let error = &json(&out)["error"];
+        assert_eq!(error["code"], "invalid");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("< /dev/null")),
+            "{error}"
+        );
+    }
+    assert!(!notes.path().join("Empty.md").exists());
+    assert_eq!(read(notes.path(), "Page.md"), "# Page\n");
 }
 
 #[test]
