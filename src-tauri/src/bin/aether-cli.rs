@@ -5,6 +5,7 @@
 //! any command that touches one fails with "path unavailable", naming
 //! nothing private.
 
+use aether_lib::install;
 use aether_lib::notes::{self, PrivateSet};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -577,7 +578,7 @@ fn check(folder: &Folder) -> Result<Report, Failure> {
 }
 
 /// The app's executable, next to the real CLI binary (inside the bundle on
-/// macOS), whatever symlink on PATH started it.
+/// macOS) whatever symlink on PATH started it, or named by the file beside a copy.
 fn app_executable() -> Result<PathBuf, Failure> {
     let cli = std::env::current_exe()
         .and_then(|exe| exe.canonicalize())
@@ -588,9 +589,14 @@ fn app_executable() -> Result<PathBuf, Failure> {
         &["Aether", "aether"]
     };
     let dir = cli.parent().unwrap_or(Path::new(""));
+    // A copied CLI (the Windows install) finds the app through the file beside it.
+    let named = std::fs::read_to_string(dir.join(install::APP_PATH_FILE))
+        .ok()
+        .map(PathBuf::from);
     names
         .iter()
         .map(|name| dir.join(name))
+        .chain(named)
         .find(|app| app.is_file() && app.canonicalize().is_ok_and(|a| a != cli))
         .ok_or_else(|| {
             Failure::Other(format!(

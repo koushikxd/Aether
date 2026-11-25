@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 pub const SKILL: &str = include_str!("../../skills/aether/SKILL.md");
 
+/// The file beside a copied CLI that holds the app's path, for `aether open`.
+pub const APP_PATH_FILE: &str = "aether-app.txt";
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillStatus {
@@ -44,11 +47,65 @@ pub fn install_skill(home: &Path) -> Result<(), String> {
 /// The CLI binary the bundler ships next to the app binary.
 pub fn bundled_cli() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find the app: {e}"))?;
+    cli_beside(&exe, std::env::var_os("APPIMAGE").is_some())
+}
+
+/// The CLI next to app binary `exe`. An AppImage runs from a temporary mount, so a link
+/// into it breaks once the app quits.
+fn cli_beside(exe: &Path, in_appimage: bool) -> Result<PathBuf, String> {
+    if in_appimage {
+        return Err(
+            "The AppImage runs from a temporary folder, so it cannot install the CLI. Install the .deb or .rpm package to use it.".into(),
+        );
+    }
     let cli = exe.with_file_name(format!("aether-cli{}", std::env::consts::EXE_SUFFIX));
     if cli.exists() {
         Ok(cli)
     } else {
         Err("This build of Aether does not include the CLI".into())
+    }
+}
+
+/// A copy of the CLI with a file beside it naming the app. Windows installs this, since
+/// symlinks there need admin rights.
+#[cfg(any(windows, test))]
+mod copy {
+    use super::*;
+
+    fn app_file(target: &Path) -> PathBuf {
+        target.with_file_name(APP_PATH_FILE)
+    }
+
+    /// True when `target` matches `cli` byte for byte and names `app`.
+    pub fn installed(target: &Path, cli: &Path, app: &Path) -> bool {
+        let names_app = fs::read_to_string(app_file(target)).is_ok_and(|p| Path::new(&p) == app);
+        names_app && matches!((fs::read(target), fs::read(cli)), (Ok(a), Ok(b)) if a == b)
+    }
+
+    pub fn install(target: &Path, cli: &Path, app: &Path) -> Result<(), String> {
+        let dir = target.parent().ok_or("Invalid CLI path")?;
+        fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+        fs::copy(cli, target).map_err(|e| format!("Failed to copy the CLI: {e}"))?;
+        fs::write(app_file(target), app.to_string_lossy().as_bytes())
+            .map_err(|e| format!("Failed to write {}: {e}", app_file(target).display()))
+    }
+
+    /// Brings an installed copy up to date after an app update or move. Installs nothing new.
+    pub fn refresh(target: &Path, cli: &Path, app: &Path) -> Result<(), String> {
+        if target.exists() && !installed(target, cli, app) {
+            install(target, cli, app)?;
+        }
+        Ok(())
+    }
+
+    pub fn remove(target: &Path) -> Result<(), String> {
+        for file in [target.to_path_buf(), app_file(target)] {
+            if file.exists() {
+                fs::remove_file(&file)
+                    .map_err(|e| format!("Failed to remove {}: {e}", file.display()))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -154,23 +211,27 @@ New-ItemProperty -LiteralPath 'HKCU:\Environment' -Name Path -Value ($parts -joi
             .ok_or_else(|| "Cannot find the local app data folder".to_string())
     }
 
-    /// True when the copy matches this app's CLI byte for byte.
+    fn app() -> Result<PathBuf, String> {
+        std::env::current_exe().map_err(|e| format!("Cannot find the app: {e}"))
+    }
+
     pub fn cli_installed(target: &Path, cli: &Path) -> bool {
-        matches!((fs::read(target), fs::read(cli)), (Ok(a), Ok(b)) if a == b)
+        app().is_ok_and(|app| copy::installed(target, cli, &app))
     }
 
     pub fn install_cli(target: &Path, cli: &Path) -> Result<(), String> {
-        let dir = target.parent().ok_or("Invalid CLI path")?;
-        fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
-        fs::copy(cli, target).map_err(|e| format!("Failed to copy the CLI: {e}"))?;
-        set_user_path(dir, true)
+        copy::install(target, cli, &app()?)?;
+        set_user_path(target.parent().ok_or("Invalid CLI path")?, true)
     }
 
     pub fn uninstall_cli(target: &Path) -> Result<(), String> {
-        if target.exists() {
-            fs::remove_file(target).map_err(|e| format!("Failed to remove the CLI: {e}"))?;
-        }
+        copy::remove(target)?;
         set_user_path(target.parent().ok_or("Invalid CLI path")?, false)
+    }
+
+    /// Run at startup: an app update leaves the installed copy on the old CLI.
+    pub fn refresh_cli() -> Result<(), String> {
+        copy::refresh(&cli_target()?, &bundled_cli()?, &app()?)
     }
 
     fn set_user_path(dir: &Path, add: bool) -> Result<(), String> {
@@ -231,6 +292,99 @@ mod tests {
 
         install_skill(home.path()).unwrap();
         assert_eq!(skill_status(home.path()), SkillStatus::Installed);
+    }
+
+    #[test]
+    fn the_appimage_refuses_to_install_the_cli() {
+        let dir = TempDir::new().unwrap();
+        let exe = dir.path().join("Aether");
+        fs::write(exe.with_file_name("aether-cli"), "cli").unwrap();
+        assert!(cli_beside(&exe, false).is_ok());
+
+        let err = cli_beside(&exe, true).unwrap_err();
+        assert!(err.contains("AppImage"), "{err}");
+    }
+
+    mod copy_install {
+        use super::*;
+
+        struct Setup {
+            _dir: TempDir,
+            app: PathBuf,
+            cli: PathBuf,
+            target: PathBuf,
+        }
+
+        /// An installed app with its CLI, and a target in a bin folder that does not exist yet.
+        fn setup() -> Setup {
+            let dir = TempDir::new().unwrap();
+            let app = dir.path().join("Aether/Aether.exe");
+            let cli = app.with_file_name("aether-cli.exe");
+            fs::create_dir_all(app.parent().unwrap()).unwrap();
+            fs::write(&app, "app").unwrap();
+            fs::write(&cli, "cli v1").unwrap();
+            let target = dir.path().join("bin/aether.exe");
+            Setup {
+                _dir: dir,
+                app,
+                cli,
+                target,
+            }
+        }
+
+        fn app_file(s: &Setup) -> PathBuf {
+            s.target.with_file_name(APP_PATH_FILE)
+        }
+
+        #[test]
+        fn install_copies_the_cli_and_names_the_app_beside_it() {
+            let s = setup();
+            assert!(!copy::installed(&s.target, &s.cli, &s.app));
+
+            copy::install(&s.target, &s.cli, &s.app).unwrap();
+
+            assert_eq!(read(&s.target).as_deref(), Some("cli v1"));
+            assert_eq!(read(&app_file(&s)).map(PathBuf::from), Some(s.app.clone()));
+            assert!(copy::installed(&s.target, &s.cli, &s.app));
+        }
+
+        #[test]
+        fn an_updated_cli_or_a_moved_app_is_out_of_date_until_refreshed() {
+            let s = setup();
+            copy::install(&s.target, &s.cli, &s.app).unwrap();
+            fs::write(&s.cli, "cli v2").unwrap();
+            assert!(!copy::installed(&s.target, &s.cli, &s.app));
+
+            copy::refresh(&s.target, &s.cli, &s.app).unwrap();
+            assert_eq!(read(&s.target).as_deref(), Some("cli v2"));
+            assert!(copy::installed(&s.target, &s.cli, &s.app));
+
+            let moved = s.app.with_file_name("Moved.exe");
+            assert!(!copy::installed(&s.target, &s.cli, &moved));
+            copy::refresh(&s.target, &s.cli, &moved).unwrap();
+            assert!(copy::installed(&s.target, &s.cli, &moved));
+        }
+
+        #[test]
+        fn refresh_leaves_an_uninstalled_cli_uninstalled() {
+            let s = setup();
+            copy::refresh(&s.target, &s.cli, &s.app).unwrap();
+            assert!(!s.target.exists());
+            assert!(!app_file(&s).exists());
+        }
+
+        #[test]
+        fn remove_deletes_the_copy_and_its_app_file_and_is_fine_when_absent() {
+            let s = setup();
+            copy::remove(&s.target).unwrap();
+
+            copy::install(&s.target, &s.cli, &s.app).unwrap();
+            copy::remove(&s.target).unwrap();
+
+            assert!(!s.target.exists());
+            assert!(!app_file(&s).exists());
+            assert!(s.cli.exists());
+        }
     }
 
     #[cfg(unix)]

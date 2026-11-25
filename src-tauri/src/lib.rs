@@ -21,7 +21,7 @@ use tokio::io::AsyncWriteExt;
 mod export;
 mod git;
 mod merge;
-mod install;
+pub mod install;
 pub mod notes;
 mod notion_import;
 mod relink;
@@ -3703,6 +3703,13 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            #[cfg(windows)]
+            std::thread::spawn(|| {
+                if let Err(e) = install::refresh_cli() {
+                    eprintln!("Failed to update the installed CLI: {e}");
+                }
+            });
+
             // Load app config on startup (contains notes folder path)
             let mut app_config = load_app_config(app.handle());
 

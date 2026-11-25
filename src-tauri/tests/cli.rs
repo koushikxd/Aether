@@ -880,6 +880,18 @@ mv "$d/opened.tmp" "$d/opened.txt"
         self.dir.path().join("bin/aether")
     }
 
+    /// A copy of the CLI away from the app, as the Windows install puts
+    /// it, with the file naming the app that the install writes beside it.
+    fn copied_cli(&self) -> PathBuf {
+        let copy = self.dir.path().join("copy");
+        std::fs::create_dir_all(&copy).expect("create copy dir");
+        std::fs::copy(env!("CARGO_BIN_EXE_aether-cli"), copy.join("aether")).expect("copy cli");
+        let app = self.dir.path().join("bundle/Aether");
+        std::fs::write(copy.join("aether-app.txt"), app.to_str().expect("utf-8"))
+            .expect("write app path");
+        copy.join("aether")
+    }
+
     /// The arguments the fake app got, once it has run.
     fn opened(&self) -> Vec<String> {
         let file = self.dir.path().join("bundle/opened.txt");
@@ -923,6 +935,20 @@ fn open_and_a_bare_path_start_the_app_with_the_path() {
     let out = cli.run_program(&install.cli(), &["--json", "nonsense"]);
     assert_eq!(out.code, 1);
     assert_eq!(json(&out)["error"]["code"], "invalid");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copied_cli_opens_the_app_its_install_named() {
+    let mut cli = Cli::new("a_copied_cli_opens_the_app_its_install_named");
+    let install = FakeInstall::new();
+    let notes = notes_folder(&[]);
+    let root = notes.path().canonicalize().expect("canonical notes folder");
+    cli.cwd = root.clone();
+
+    let out = cli.run_program(&install.copied_cli(), &["open", "."]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(install.opened(), [root.to_str().expect("utf-8")]);
 }
 
 #[test]
