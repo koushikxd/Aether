@@ -1663,9 +1663,12 @@ fn public_conflicts_are_listed_and_continue_waits_for_the_markers_to_go() {
     let synced = agent(&c.b, Action::Sync, None);
     let marked = c.b.read("Home.md");
     let early = agent(&c.b, Action::SyncContinue, None);
+    let mid_merge_commit = agent(&c.b, Action::Commit, None);
     let still_merging = git::merge_in_progress(c.b.root());
     c.b.write("Home.md", "# Home\n\n```\n<<<<<<< HEAD\nhello\n```\n");
     let fenced = agent(&c.b, Action::SyncContinue, None);
+    c.b.write("Home.md", "# Home\n\n<<<<<<<<<<<< HEAD\nhello\n>>>>>>>>>>>> theirs\n");
+    let wide = agent(&c.b, Action::SyncContinue, None);
     c.b.write("Home.md", "# Home\n\nhello from both\n");
     let finished = agent(&c.b, Action::SyncContinue, None);
     let a_synced = agent(&c.a, Action::Sync, None);
@@ -1680,8 +1683,15 @@ fn public_conflicts_are_listed_and_continue_waits_for_the_markers_to_go() {
     assert!(marked.contains("<<<<<<<"), "{marked}");
     assert_eq!(early.outcome, Outcome::Conflicts, "{early:?}");
     assert_eq!(conflict_pages(&early), ["Home"]);
+    assert_eq!(mid_merge_commit.outcome, Outcome::Error, "{mid_merge_commit:?}");
+    assert!(
+        mid_merge_commit.message.contains("sync --continue"),
+        "{}",
+        mid_merge_commit.message
+    );
     assert!(still_merging);
     assert_eq!(fenced.outcome, Outcome::Conflicts, "{fenced:?}");
+    assert_eq!(wide.outcome, Outcome::Conflicts, "{wide:?}");
     assert_ok(&finished);
     assert!(!git::merge_in_progress(c.b.root()));
     assert_eq!(
@@ -1691,6 +1701,41 @@ fn public_conflicts_are_listed_and_continue_waits_for_the_markers_to_go() {
     assert_ok(&a_synced);
     assert_eq!(c.a.read("Home.md"), "# Home\n\nhello from both\n");
     assert_eq!(c.b.read("Finance.md"), "# Finance\n\nsecret-balance-4242\n");
+}
+
+#[test]
+fn continue_commits_each_conflicted_file_as_the_agent_left_it() {
+    let c = clones();
+    enter(&c.b, &c.key).expect("enter key");
+    c.a.write_bytes("data.bin", &[0xff, 0]);
+    c.a.write("Notes.md", "# Notes\n\nbase\n");
+    assert_ok(&agent(&c.a, Action::Commit, None));
+    assert_ok(&agent(&c.a, Action::Sync, None));
+    assert_ok(&agent(&c.b, Action::Sync, None));
+    c.a.write_bytes("data.bin", &[0xff, 1]);
+    c.a.write("Notes.md", "# Notes\n\nfrom A\n");
+    assert_ok(&agent(&c.a, Action::Commit, None));
+    assert_ok(&agent(&c.a, Action::Sync, None));
+    c.b.write_bytes("data.bin", &[0xff, 2]);
+    c.b.write("Notes.md", "# Notes\n\nfrom B\n");
+    assert_ok(&agent(&c.b, Action::Commit, None));
+
+    let synced = agent(&c.b, Action::Sync, None);
+    c.b.write_bytes("data.bin", &[0xff, 3]);
+    std::fs::remove_file(c.b.root().join("Notes.md")).expect("remove");
+    let finished = agent(&c.b, Action::SyncContinue, None);
+
+    artifact(
+        "continue_commits_each_conflicted_file_as_the_agent_left_it",
+        &[("b", &c.b)],
+    );
+    assert_eq!(conflict_pages(&synced), ["Notes", "data.bin"]);
+    assert_ok(&finished);
+    let data = git_out(c.b.root(), &["show", "HEAD:data.bin"]).stdout;
+    assert_eq!(data, [0xff, 3]);
+    assert!(!git_out(c.b.root(), &["cat-file", "-e", "HEAD:Notes.md"])
+        .status
+        .success());
 }
 
 #[test]

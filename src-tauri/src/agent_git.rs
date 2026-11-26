@@ -3,7 +3,7 @@
 //! folder and the app writes back a reply. Replies name public pages only
 //! and give private ones as a count.
 
-use crate::merge::{self, ConflictFile, ConflictResolution};
+use crate::merge::{self, ConflictFile};
 use crate::vault::{self, KeyStore};
 use crate::{git, git::GitResult};
 use serde::{Deserialize, Serialize};
@@ -245,6 +245,9 @@ pub fn handle(
     // Before and after, since a pull can change what is private.
     let before = vault::private_names(root, ignored);
     let reply = match request.action {
+        Action::Commit if git::merge_in_progress(root) => Reply::error(
+            "A sync is stopped on conflicts: finish it with aether sync --continue, or cancel it with aether sync --abort",
+        ),
         Action::Commit => {
             let message = request.message.as_deref().unwrap_or(DEFAULT_MESSAGE);
             vault::commit(root, ignored, store, message).into()
@@ -353,30 +356,17 @@ fn conflict_reply(
 }
 
 /// Whether `path` still holds a git conflict marker, inside fenced code too,
-/// where git writes them as well.
+/// where git writes them as well. Markers are 7 characters or longer.
 fn has_markers(root: &Path, path: &str) -> bool {
     let Ok(text) = std::fs::read_to_string(crate::dir_from_id(root, path)) else {
         return false;
     };
     text.lines().any(|line| {
-        ["<<<<<<<", ">>>>>>>"].iter().any(|marker| {
-            line.strip_prefix(marker)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        ['<', '>'].iter().any(|c| {
+            let rest = line.trim_start_matches(*c);
+            line.len() - rest.len() >= 7 && (rest.is_empty() || rest.starts_with(' '))
         })
     })
-}
-
-/// The file as it is on disk, which is how the agent resolved it. A deleted
-/// file takes the side that deleted it. A binary file keeps the version git
-/// left, which is this device's.
-fn resolution(root: &Path, file: &ConflictFile) -> ConflictResolution {
-    match std::fs::read(crate::dir_from_id(root, &file.path)) {
-        Err(_) if file.theirs_deleted && !file.ours_deleted => ConflictResolution::Theirs,
-        Err(_) => ConflictResolution::Ours,
-        Ok(bytes) => String::from_utf8(bytes).map_or(ConflictResolution::Ours, |content| {
-            ConflictResolution::Text { content }
-        }),
-    }
 }
 
 fn continue_sync(root: &Path, ignored: &[String], store: &dyn KeyStore) -> Reply {
@@ -402,8 +392,12 @@ fn continue_sync(root: &Path, ignored: &[String], store: &dyn KeyStore) -> Reply
     if !unresolved.is_empty() {
         return conflict_reply(root, ignored, &unresolved, private);
     }
+    // Each file as the agent left it on disk, a removed one as deleted.
     for file in &public {
-        if let Err(error) = merge::resolve(root, store, &file.path, resolution(root, file)) {
+        if let Err(error) = git::run(
+            root,
+            &["--literal-pathspecs", "add", "-A", "--", &file.path],
+        ) {
             return Reply::error(error);
         }
     }

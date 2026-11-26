@@ -65,7 +65,7 @@ A **clip** is something the user asks you to save to Aether while working in ano
 ### Syncing
 
 1. `aether sync --json` pulls, merges, and pushes. Exit 0: done. Exit 1 with "Commit your changes before syncing": run `aether commit` first when the user asked for a commit, otherwise tell the user.
-2. Exit 3 (`merge_conflicts`): `error.conflicts` lists the public files holding git's conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`). Resolve every one, merging both sides and removing all markers. A page: `read` it, then `edit` it with `--if-match`. A file with `"page": null`: edit the file at `path` in the notes folder directly, the one file you write by hand. Private conflicts are the app's: they appear only as the `privateConflicts` count.
+2. Exit 3 (`merge_conflicts`): `error.conflicts` lists the public files holding git's conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`). Resolve every one, merging both sides and removing all markers. A page: `read` it, then `edit` it with `--if-match`, keeping its `# Title` line so the page keeps its file. A file with `"page": null`: edit the file at `path` in the notes folder directly, the one file you write by hand. Private conflicts are the app's: they appear only as the `privateConflicts` count.
 3. `aether sync --continue --json`. Exit 3 again means a listed file still holds markers, fenced code blocks included: back to step 2. Exit 0: merged and pushed.
 4. Exit 4 (`handed_off`): the app has opened its merge editor on the private pages. Tell the user to finish the merge in Aether, which pushes after, and end there with no further sync commands.
 
