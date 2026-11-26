@@ -1773,3 +1773,45 @@ fn an_agent_request_for_another_folder_is_refused() {
         );
     }
 }
+
+#[test]
+fn app_git_work_and_agent_requests_wait_for_each_other() {
+    let notes = repo();
+    notes.write("Home.md", "# Home\n");
+    let request = Request {
+        folder: notes.root().to_path_buf(),
+        action: Action::Commit,
+        message: None,
+    };
+    let state = notes.state();
+
+    let held = state.git_lock.lock().expect("git lock");
+    let (waited, reply, committed) = std::thread::scope(|s| {
+        let agent = s.spawn(|| crate::run_agent_request(&state, &request));
+        let app = s.spawn(|| block_on(crate::git_commit("App".to_string(), state.clone())));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let waited = !agent.is_finished() && !app.is_finished();
+        drop(held);
+        let reply = agent.join().expect("agent thread");
+        let committed = app.join().expect("app thread").expect("git_commit");
+        (waited, reply, committed)
+    });
+
+    assert!(waited, "git work ran while the lock was held");
+    // One commits, the other finds nothing left.
+    assert_ok(&reply);
+    assert!(committed.success, "{:?}", committed.error);
+    assert_eq!(git(notes.root(), &["rev-list", "--count", "HEAD"]), "1\n");
+}
+
+#[test]
+fn an_agent_commit_with_nothing_to_commit_succeeds() {
+    let notes = repo();
+    notes.write("Home.md", "# Home\n");
+    assert_ok(&agent(&notes, Action::Commit, None));
+
+    let again = agent(&notes, Action::Commit, None);
+
+    assert_ok(&again);
+    assert_eq!(again.message, "Nothing to commit");
+}

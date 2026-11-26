@@ -435,6 +435,8 @@ pub struct AppState {
     pub search_index: Mutex<Option<SearchIndex>>,
     pub debounce_map: Arc<Mutex<HashMap<PathBuf, Instant>>>,
     pub key_store: Arc<dyn vault::KeyStore>,
+    /// Held by all git work, so the app's and the agent CLI's never interleave.
+    pub git_lock: Arc<Mutex<()>>,
 }
 
 impl Default for AppState {
@@ -447,6 +449,7 @@ impl Default for AppState {
             search_index: Mutex::new(None),
             debounce_map: Arc::new(Mutex::new(HashMap::new())),
             key_store: vault::default_store(),
+            git_lock: Arc::default(),
         }
     }
 }
@@ -2503,6 +2506,33 @@ async fn open_url_safe(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open URL: {}", e))
 }
 
+/// Runs an agent CLI request on the open notes folder.
+fn run_agent_request(state: &AppState, request: &agent_git::Request) -> agent_git::Reply {
+    let root = notes_folder(state).ok().map(PathBuf::from);
+    let ignored = ignored_dirs(state);
+    let _git = lock_git(&state.git_lock);
+    agent_git::handle(request, root.as_deref(), &ignored, state.key_store.as_ref())
+}
+
+/// The git lock. A panic during git work leaves nothing for the next to wait on.
+fn lock_git(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Runs `f` off the async runtime, holding the git lock.
+async fn with_git<T: Send + 'static>(
+    state: &AppState,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let lock = state.git_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _git = lock_git(&lock);
+        f()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Runs `f` with the notes folder, ignored folders and key store, off the async runtime.
 async fn with_vault<T: Send + 'static>(
     state: &AppState,
@@ -2511,9 +2541,7 @@ async fn with_vault<T: Send + 'static>(
     let root = PathBuf::from(notes_folder(state)?);
     let ignored = ignored_dirs(state);
     let store = state.key_store.clone();
-    tauri::async_runtime::spawn_blocking(move || f(&root, &ignored, store.as_ref()))
-        .await
-        .map_err(|e| e.to_string())
+    with_git(state, move || f(&root, &ignored, store.as_ref())).await
 }
 
 #[tauri::command]
@@ -2607,7 +2635,7 @@ async fn git_get_status(state: State<'_, AppState>) -> Result<git::GitStatus, St
 
     let ignored = ignored_dirs(&state);
     match folder {
-        Some(path) => tauri::async_runtime::spawn_blocking(move || {
+        Some(path) => with_git(&state, move || {
             let root = PathBuf::from(path);
             let mut status = git::get_status(&root);
             if status.is_repo {
@@ -2615,8 +2643,7 @@ async fn git_get_status(state: State<'_, AppState>) -> Result<git::GitStatus, St
             }
             status
         })
-        .await
-        .map_err(|e| e.to_string()),
+        .await,
         None => Ok(git::GitStatus::default()),
     }
 }
@@ -2628,11 +2655,10 @@ async fn git_init_repo(state: State<'_, AppState>) -> Result<(), String> {
         app_config.notes_folder.clone().ok_or("Notes folder not set")?
     };
 
-    tauri::async_runtime::spawn_blocking(move || {
+    with_git(&state, move || {
         git::git_init(&PathBuf::from(folder))
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?
 }
 
 #[tauri::command]
@@ -2645,11 +2671,10 @@ async fn git_commit(message: String, state: State<'_, AppState>) -> Result<git::
     let ignored = ignored_dirs(&state);
     let store = state.key_store.clone();
     match folder {
-        Some(path) => tauri::async_runtime::spawn_blocking(move || {
+        Some(path) => with_git(&state, move || {
             vault::commit(&PathBuf::from(path), &ignored, store.as_ref(), &message)
         })
-        .await
-        .map_err(|e| e.to_string()),
+        .await,
         None => Ok(git::GitResult {
             success: false,
             message: None,
@@ -2667,11 +2692,10 @@ async fn git_push(state: State<'_, AppState>) -> Result<git::GitResult, String> 
 
     match folder {
         Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
+            with_git(&state, move || {
                 git::push(&PathBuf::from(path))
             })
             .await
-            .map_err(|e| e.to_string())
         }
         None => Ok(git::GitResult {
             success: false,
@@ -2690,11 +2714,10 @@ async fn git_fetch(state: State<'_, AppState>) -> Result<git::GitResult, String>
 
     match folder {
         Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
+            with_git(&state, move || {
                 git::fetch(&PathBuf::from(path))
             })
             .await
-            .map_err(|e| e.to_string())
         }
         None => Ok(git::GitResult {
             success: false,
@@ -2714,11 +2737,10 @@ async fn git_pull(state: State<'_, AppState>) -> Result<git::GitResult, String> 
     let ignored = ignored_dirs(&state);
     let store = state.key_store.clone();
     match folder {
-        Some(path) => tauri::async_runtime::spawn_blocking(move || {
+        Some(path) => with_git(&state, move || {
             vault::pull(&PathBuf::from(path), &ignored, store.as_ref())
         })
-        .await
-        .map_err(|e| e.to_string()),
+        .await,
         None => Ok(git::GitResult {
             success: false,
             message: None,
@@ -2736,11 +2758,10 @@ async fn git_add_remote(url: String, state: State<'_, AppState>) -> Result<git::
 
     match folder {
         Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
+            with_git(&state, move || {
                 git::add_remote(&PathBuf::from(path), &url)
             })
             .await
-            .map_err(|e| e.to_string())
         }
         None => Ok(git::GitResult {
             success: false,
@@ -2759,11 +2780,10 @@ async fn git_set_remote_url(url: String, state: State<'_, AppState>) -> Result<g
 
     match folder {
         Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
+            with_git(&state, move || {
                 git::set_remote_url(&PathBuf::from(path), &url)
             })
             .await
-            .map_err(|e| e.to_string())
         }
         None => Ok(git::GitResult {
             success: false,
@@ -2782,11 +2802,10 @@ async fn git_remove_remote(state: State<'_, AppState>) -> Result<git::GitResult,
 
     match folder {
         Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
+            with_git(&state, move || {
                 git::remove_remote(&PathBuf::from(path))
             })
             .await
-            .map_err(|e| e.to_string())
         }
         None => Ok(git::GitResult {
             success: false,
@@ -2805,7 +2824,7 @@ async fn git_push_with_upstream(state: State<'_, AppState>) -> Result<git::GitRe
 
     match folder {
         Some(path) => {
-            tauri::async_runtime::spawn_blocking(move || {
+            with_git(&state, move || {
                 // Get current branch first
                 let status = git::get_status(&PathBuf::from(&path));
                 match status.current_branch {
@@ -2830,7 +2849,6 @@ async fn git_push_with_upstream(state: State<'_, AppState>) -> Result<git::GitRe
                 }
             })
             .await
-            .map_err(|e| e.to_string())
         }
         None => Ok(git::GitResult {
             success: false,
@@ -3762,6 +3780,7 @@ pub fn run() {
                 search_index: Mutex::new(search_index),
                 debounce_map: Arc::new(Mutex::new(HashMap::new())),
                 key_store,
+                git_lock: Arc::default(),
             };
             app.manage(state);
 
