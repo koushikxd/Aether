@@ -222,8 +222,8 @@ pub fn commit_all(
                 }
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                // "nothing to commit" is not really an error
-                if stderr.contains("nothing to commit") {
+                // "nothing to commit" is not really an error. Git prints it on stdout.
+                if String::from_utf8_lossy(&output.stdout).contains("nothing to commit") {
                     GitResult {
                         success: true,
                         message: Some("Nothing to commit".to_string()),
