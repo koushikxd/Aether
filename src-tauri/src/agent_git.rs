@@ -269,17 +269,31 @@ fn same_folder(a: &Path, b: &Path) -> bool {
 
 /// `reply` with its message withheld when it names a private page or file,
 /// or when the private names could not be read.
-fn redact(mut reply: Reply, names: &[Result<BTreeSet<String>, String>]) -> Reply {
+pub(crate) fn redact(mut reply: Reply, names: &[Result<BTreeSet<String>, String>]) -> Reply {
     let leaks = names.iter().any(|names| match names {
-        Ok(names) => names
-            .iter()
-            .any(|name| reply.message.contains(name.as_str())),
+        Ok(names) => names.iter().any(|name| {
+            reply.message.contains(name.as_str()) || reply.message.contains(&git_quoted(name))
+        }),
         Err(_) => true,
     });
     if leaks {
         reply.message = WITHHELD.to_string();
     }
     reply
+}
+
+/// `name` the way git prints a path with bytes outside ASCII: quoted, with
+/// those bytes in octal.
+fn git_quoted(name: &str) -> String {
+    let mut quoted = String::new();
+    for byte in name.bytes() {
+        match byte {
+            b'"' | b'\\' => quoted.extend(['\\', byte as char]),
+            0x80.. => quoted.push_str(&format!("\\{byte:03o}")),
+            _ => quoted.push(byte as char),
+        }
+    }
+    quoted
 }
 
 fn sync(root: &Path, ignored: &[String], store: &dyn KeyStore) -> Reply {
@@ -391,6 +405,23 @@ fn continue_sync(root: &Path, ignored: &[String], store: &dyn KeyStore) -> Reply
         .collect();
     if !unresolved.is_empty() {
         return conflict_reply(root, ignored, &unresolved, private);
+    }
+    // A conflicted page away from its path was renamed or moved, so staging
+    // would delete it and leave the resolution out of the merge.
+    let away: Vec<&str> = public
+        .iter()
+        .filter(|f| !f.ours_deleted && !f.theirs_deleted)
+        .map(|f| f.path.as_str())
+        .filter(|path| {
+            let file = crate::dir_from_id(root, path);
+            crate::id_from_abs_path(root, &file, ignored).is_some() && !file.exists()
+        })
+        .collect();
+    if !away.is_empty() {
+        return Reply::error(format!(
+            "A page with conflicts was renamed or moved: put it back at {}, then run aether sync --continue",
+            away.join(", ")
+        ));
     }
     // Each file as the agent left it on disk, a removed one as deleted.
     for file in &public {

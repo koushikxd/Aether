@@ -1708,34 +1708,67 @@ fn continue_commits_each_conflicted_file_as_the_agent_left_it() {
     let c = clones();
     enter(&c.b, &c.key).expect("enter key");
     c.a.write_bytes("data.bin", &[0xff, 0]);
-    c.a.write("Notes.md", "# Notes\n\nbase\n");
+    c.a.write("notes.txt", "base\n");
     assert_ok(&agent(&c.a, Action::Commit, None));
     assert_ok(&agent(&c.a, Action::Sync, None));
     assert_ok(&agent(&c.b, Action::Sync, None));
     c.a.write_bytes("data.bin", &[0xff, 1]);
-    c.a.write("Notes.md", "# Notes\n\nfrom A\n");
+    c.a.write("notes.txt", "from A\n");
     assert_ok(&agent(&c.a, Action::Commit, None));
     assert_ok(&agent(&c.a, Action::Sync, None));
     c.b.write_bytes("data.bin", &[0xff, 2]);
-    c.b.write("Notes.md", "# Notes\n\nfrom B\n");
+    c.b.write("notes.txt", "from B\n");
     assert_ok(&agent(&c.b, Action::Commit, None));
 
     let synced = agent(&c.b, Action::Sync, None);
     c.b.write_bytes("data.bin", &[0xff, 3]);
-    std::fs::remove_file(c.b.root().join("Notes.md")).expect("remove");
+    std::fs::remove_file(c.b.root().join("notes.txt")).expect("remove");
     let finished = agent(&c.b, Action::SyncContinue, None);
 
     artifact(
         "continue_commits_each_conflicted_file_as_the_agent_left_it",
         &[("b", &c.b)],
     );
-    assert_eq!(conflict_pages(&synced), ["Notes", "data.bin"]);
+    assert_eq!(conflict_pages(&synced), ["data.bin", "notes.txt"]);
     assert_ok(&finished);
     let data = git_out(c.b.root(), &["show", "HEAD:data.bin"]).stdout;
     assert_eq!(data, [0xff, 3]);
-    assert!(!git_out(c.b.root(), &["cat-file", "-e", "HEAD:Notes.md"])
+    assert!(!git_out(c.b.root(), &["cat-file", "-e", "HEAD:notes.txt"])
         .status
         .success());
+}
+
+#[test]
+fn continue_refuses_while_a_conflicted_page_is_away_from_its_path() {
+    let c = public_conflict();
+    assert_eq!(agent(&c.b, Action::Sync, None).outcome, Outcome::Conflicts);
+    std::fs::remove_file(c.b.root().join("Home.md")).expect("remove");
+    c.b.write("Hello.md", "# Hello\n\nhello from both\n");
+
+    let renamed = agent(&c.b, Action::SyncContinue, None);
+    let still_merging = git::merge_in_progress(c.b.root());
+    std::fs::remove_file(c.b.root().join("Hello.md")).expect("remove");
+    c.b.write("Home.md", "# Home\n\nhello from both\n");
+    let finished = agent(&c.b, Action::SyncContinue, None);
+
+    artifact(
+        "continue_refuses_while_a_conflicted_page_is_away_from_its_path",
+        &[("b", &c.b)],
+    );
+    assert_eq!(renamed.outcome, Outcome::Error, "{renamed:?}");
+    assert!(renamed.message.contains("Home.md"), "{}", renamed.message);
+    assert!(still_merging);
+    assert_ok(&finished);
+}
+
+#[test]
+fn a_reply_naming_a_private_page_the_way_git_quotes_it_is_withheld() {
+    let names = std::collections::BTreeSet::from(["Finance/B\u{e4}nk/Link.md".to_string()]);
+    let reply = Reply::error("refused:\n  \"Finance/B\\303\\244nk/Link.md\"");
+
+    let redacted = agent_git::redact(reply, &[Ok(names)]);
+
+    assert!(!redacted.message.contains("nk/Link.md"), "{}", redacted.message);
 }
 
 #[test]
