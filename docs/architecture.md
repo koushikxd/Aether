@@ -7,6 +7,9 @@ Tauri v2 app. A Rust backend owns the file system, search, and git. A React 19 +
 ```
 src-tauri/src/
   lib.rs            Tauri commands, AppState, settings, note ids, search index, file watcher, setup
+  notes.rs          note core with no Tauri types (list, read, save, create, move, search), shared with the CLI
+  bin/aether-cli.rs the `aether` CLI
+  install.rs        puts the CLI on PATH and installs the agent skill
   git.rs            git CLI wrappers (status, commit_all, pull, push, merge helpers)
   vault.rs          private pages: encryption, exclude block, hooks, commit/pull integration
   merge.rs          conflicts of an unfinished merge, public and private, for the merge editor
@@ -14,7 +17,9 @@ src-tauri/src/
   export.rs         zip export (page with its sub-pages, workspace) and zip import
   notion_import.rs  Notion HTML export import
   tests.rs, vault_tests.rs, test_support.rs   cargo tests (cfg(test) only)
+src-tauri/tests/cli.rs                      cargo tests that run the built CLI
 src-tauri/capabilities/default.json         Tauri permissions
+skills/aether/SKILL.md                      the agent skill, embedded in the app
 src/
   App.tsx           providers, global key handlers, view switching, preview window mode
   context/          NotesContext, GitContext, VaultContext, ThemeContext
@@ -32,8 +37,8 @@ tests/e2e/          Playwright specs plus the fake backend
 - A sub-page folder is `Page/` next to `Page.md` (`sub_page_dir`). Renames and deletes move or remove both. After a delete or move, `remove_empty_sub_page_dir` removes the old parent's `Page/` when it is empty and `Page.md` exists.
 - A bare page is a folder with no matching `.md` (`bare_page_dir`). `list_notes` lists it with its folder name as title and the folder's mtime. `read_note` returns `# <name>` without writing. `save_note` writes the file on the first save, and `create_bare_page_file` writes it first in `move_note` and `vault_set_private`. `delete_note` removes the folder.
 - Search: Tantivy index in `{APP_DATA}/search_index`, rebuilt when a folder opens and updated on save, create, delete, and watcher events. Queries are phrase-prefix over the title, then the content. A substring search is the fallback.
-- File watcher (`notify`): debounces 500 ms per path, updates the index, and emits `file-change`.
-- Other events: `set-notes-folder` (from the `aether` CLI) and `notion-import-progress`.
+- File watcher (`notify`): debounces 500 ms per path, updates the index, and emits `file-change`. When another program changes `.aether/settings.json`, it reloads the settings in `AppState` and emits `settings-changed`, so the app does not write old pins back.
+- Other events: `set-notes-folder` (from `aether open`) and `notion-import-progress`.
 
 ## Frontend
 
@@ -43,7 +48,7 @@ tests/e2e/          Playwright specs plus the fake backend
 - `VaultContext` holds the private pages status (`privateIds`, `privateRoots`), the key dialogs, and `makePrivate` / `makePublic`. It refetches status when the notes list or git status changes.
 - `TabsContext` holds the open tabs and each tab's history, and keeps the active tab and `NotesContext`'s selected note in step. NotesContext tells it about created, moved, and deleted notes through `src/lib/noteEvents.ts`. See [tabs.md](tabs.md).
 - `ThemeContext` holds theme, fonts, page width, text direction, and zoom, persisted through the per-folder settings.
-- The editor (`components/editor/Editor.tsx`) saves 500 ms after the last edit (300 ms in source mode) through `save_note`.
+- The editor (`components/editor/Editor.tsx`) saves 500 ms after the last edit (300 ms in source mode) through `save_note`. On a `file-change` for the open note it reloads the note, unless it has unsaved edits. Then it holds them (`heldRef`) and saves nothing until Refresh, Overwrite, or another note.
 - The command menu is `components/command-palette/CommandPalette.tsx`. The shortcut reference is `src/lib/shortcuts.ts`. Global key handlers are in `App.tsx`, editor ones in `Editor.tsx`.
 - The sidebar tree is `components/notes/FolderTreeView.tsx`. `buildPageTree` in `src/lib/folderTree.ts` nests each page under its parent, newest first at every level. `App.tsx` turns `Up` and `Down` pressed outside the tree into `step-note-list` events, which the tree answers by selecting the next visible row. Drops are handled in `components/layout/Sidebar.tsx`. `components/notes/MovePageDialog.tsx` opens on the `open-move-picker` event (from the row menu, the selection bar, and the command menu) and calls `move_note` for each page.
 - Recent notes, open tabs (`aether:tabs:<folder>`), and collapsed pages (`aether:collapsedFolders`) are in `localStorage`. Tab state never goes in `.aether/settings.json`, which is committed.
@@ -103,6 +108,18 @@ The frontend `sync()` in `GitContext` pulls, then pushes if ahead.
 
 When a pull fails, `GitContext` calls `git_conflicts`. If the list is not empty it shows the merge editor. Conflicts come from unmerged index paths; a private blob conflict is decrypted from index stages 1 to 3. Chunks come from `git merge-file` run in a temp dir inside `.git`, so private text never leaves the notes folder. Each file is saved with `git_resolve_conflict` (re-encrypted when private), then `git_finish_merge` commits the merge, decrypts, and the frontend pushes. `git_abort_merge` runs `git merge --abort` and decrypts again.
 
+### CLI (bin/aether-cli.rs)
+
+- A second binary, `aether-cli`, built on `notes.rs`. It is not named `aether` because `aether` and `Aether` collide on case-insensitive file systems. It parses arguments with `clap`.
+- It finds the notes folder from `--folder`, the nearest `.aether/` above the current directory, or `notes_folder` in the app's `config.json` (`dirs::data_dir()/com.aether.app`).
+- It removes private pages from every input and output with `vault::current_private_set`, which reads `.git/aether-vault.json` and needs no key. Errors for private paths say `path unavailable`, including name collisions and the `-2` suffixes a new name would pass over. Pages reached through a symlink count as private, and a page id resolves only when spelled exactly as on disk (no other casing, `//`, or `.`). A folder inside another notes folder that has marks is refused, since its marks live at that root.
+- `read` returns a SHA-256 hash of the markdown. `edit --if-match` compares it before writing. Renames and moves run `notes::after_moves` (links and private marks), then `notes::follow_pins`, which rewrites pins in `.aether/settings.json`.
+- `search` scans the `.md` files with the same matching as the app's fallback search. It does not open the Tantivy index, which the running app holds.
+- `open` and a bare path spawn the app binary next to the CLI, detached, with the path. The app's `handle_cli_args` and the single-instance plugin take it from there.
+- The Tauri bundler ships every `src/bin` binary next to the app binary: `Contents/MacOS/` on macOS, `usr/bin/` in the deb, next to `Aether.exe` on Windows. No `externalBin` is used.
+- Install (`install.rs`): on macOS and Linux a symlink named `aether` points to the bundled `aether-cli`, in Homebrew's bin folder on macOS and `~/.local/bin` on Linux. It replaces the shell wrapper older versions installed (marked `# AETHER_CLI_WRAPPER`) and never touches an `aether` that Aether did not install. On Windows it copies `aether-cli.exe` to `%LOCALAPPDATA%\com.aether.app\bin\aether.exe`, writes the app's path beside it in `aether-app.txt` (how the copy finds the app for `aether open`), and adds that folder to the user `PATH` in the registry. At startup the Windows app re-copies an installed CLI that an update left out of date. The Linux AppImage refuses to install: it runs from a temporary mount that a link would outlive. Status reads installed only when the entry is this app's CLI.
+- The skill (`skills/aether/SKILL.md`) is embedded with `include_str!` and written to `~/.claude/skills/aether/` and `~/.agents/skills/aether/`.
+
 ### Export and import (export.rs)
 
 `export_folder_zip(folder, dest, includePrivate)` and `export_note_zip(id, markdown, dest, includePrivate)` leave out the current private set unless `includePrivate`. The workspace export in settings calls `export_folder_zip` on the whole notes folder and asks only when the notes folder has a vault. `export_note_zip` takes the editor's current markdown and adds the page's sub-page folder with the assets its notes use. The editor asks only when the page or a sub-page is private (`ExportZipDialog` in `components/vault`). For a private page it shows a warning instead of the checkbox, and confirming exports the page and its sub-pages with `includePrivate`. `import_zip` skips app folders and refuses entries that would escape the folder. `import_notion` converts Notion HTML zips, writes top-level pages at the notes folder root (`-1`, `-2` on a name clash), returns the ids it wrote for the private-page picker, and re-indexes.
@@ -110,13 +127,14 @@ When a pull fails, `GitContext` calls `git_conflicts`. If the list is not empty 
 ## Tests
 
 - `pnpm test:e2e`: Playwright against `pnpm dev` on port 1420. `tests/e2e/app.ts` injects `fake-backend.ts`, which mocks IPC with an in-memory notes folder. `fake-vault.ts` (seeded via `window.aetherFakeVault`) and `fake-merge.ts` (`window.aetherFakeConflicts`) add the vault and conflict commands. An unhandled command fails the test.
-- `pnpm test:rust`: `cargo test`. `tests.rs` covers commands through `test_support::TestNotes`. `vault_tests.rs` runs real git repos and clones in temp dirs with the in-memory key store.
+- `pnpm test:rust`: `cargo test`. `tests.rs` covers commands through `test_support::TestNotes`. `src-tauri/tests/cli.rs` runs the built CLI against temp notes folders and writes each transcript to `test-results/cli/`. `vault_tests.rs` runs real git repos and clones in temp dirs with the in-memory key store.
 - `pnpm test` runs both. See `tests/README.md` for helpers and artifacts.
 
 ## Notes for agents
 
 - Every backend operation is a Tauri command in `src-tauri/src/lib.rs`, registered in `generate_handler!`. Add a wrapper in `src/services/` and a handler in `tests/e2e/fake-backend.ts` (same JSON shape as the Rust return) for each new command.
 - New Tauri permissions go in `src-tauri/capabilities/default.json`.
+- The app and the `aether` CLI share `notes.rs`. Change note behavior (naming, saving, moving, search) there, not in a Tauri command or the CLI, so both keep it. When the CLI's commands or output change, update `skills/aether/SKILL.md`: the app installs that text for agents.
 - Do not run `cargo fmt`: the committed Rust is not rustfmt-clean, so it would reformat unrelated code. Run `rustfmt --edition 2021 <file>` on the files you changed.
 - Never commit from the terminal inside a notes folder that has private pages. The hooks refuse it, and `--no-verify` would commit plaintext. Commit from the app. Do not edit the exclude block or `.git/aether-*` files by hand.
 - Scripts are in `package.json`: `lint`, `fmt:check`, `build` (tsc + Vite), `test:e2e`, `test:rust`, `test`. CI runs format check, lint, frontend build, `cargo check`, and `cargo clippy`.

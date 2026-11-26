@@ -21,6 +21,8 @@ use tokio::io::AsyncWriteExt;
 mod export;
 mod git;
 mod merge;
+pub mod install;
+pub mod notes;
 mod notion_import;
 mod relink;
 #[cfg(test)]
@@ -42,7 +44,6 @@ pub struct NoteMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliStatus {
-    pub supported: bool,
     pub installed: bool,
     pub path: Option<String>,
 }
@@ -596,6 +597,13 @@ fn generate_preview(content: &str) -> String {
     String::new()
 }
 
+static IMAGE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"!\[([^\]]*)\]\([^)]+\)").unwrap());
+static LINK_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
+static LIST_MARKER_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^(\s*[-+*]|\s*\d+\.)\s+").unwrap());
+
 // Strip common markdown formatting from text
 fn strip_markdown(text: &str) -> String {
     let mut result = text.to_string();
@@ -645,12 +653,10 @@ fn strip_markdown(text: &str) -> String {
     }
 
     // Remove images ![alt](url) - must come before links
-    let img_re = regex::Regex::new(r"!\[([^\]]*)\]\([^)]+\)").unwrap();
-    result = img_re.replace_all(&result, "$1").to_string();
+    result = IMAGE_RE.replace_all(&result, "$1").to_string();
 
     // Remove links [text](url)
-    let link_re = regex::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap();
-    result = link_re.replace_all(&result, "$1").to_string();
+    result = LINK_RE.replace_all(&result, "$1").to_string();
 
     // Remove italic (*text* or _text_) - simple approach after bold is removed
     // Match *text* where text doesn't contain *
@@ -687,8 +693,7 @@ fn strip_markdown(text: &str) -> String {
         .replace("- [X] ", "");
 
     // Remove list markers at start (-, *, +, 1.)
-    let list_re = regex::Regex::new(r"^(\s*[-+*]|\s*\d+\.)\s+").unwrap();
-    result = list_re.replace(&result, "").to_string();
+    result = LIST_MARKER_RE.replace(&result, "").to_string();
 
     result.trim().to_string()
 }
@@ -883,6 +888,24 @@ fn load_settings(notes_folder: &str) -> Settings {
     settings
 }
 
+/// Takes in a settings file another program (the CLI) wrote, and returns
+/// whether the settings in memory changed. A file that does not parse, as one
+/// caught mid-write, is skipped.
+fn reload_settings(settings: &RwLock<Settings>, notes_folder: &str) -> bool {
+    let parses = std::fs::read_to_string(get_settings_path(notes_folder))
+        .is_ok_and(|text| serde_json::from_str::<Settings>(&text).is_ok());
+    if !parses {
+        return false;
+    }
+    let fresh = load_settings(notes_folder);
+    let mut settings = settings.write().expect("settings write lock");
+    if serde_json::to_value(&*settings).ok() == serde_json::to_value(&fresh).ok() {
+        return false;
+    }
+    *settings = fresh;
+    true
+}
+
 // Save per-folder settings to disk, without the pins of private pages
 fn save_settings(notes_folder: &str, settings: &Settings) -> Result<()> {
     let path = get_settings_path(notes_folder);
@@ -897,30 +920,11 @@ fn save_settings(notes_folder: &str, settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// Points private-page marks at their new ids after `moves`, rewrites links
-/// across the notes folder, off the async runtime, and re-indexes the notes
-/// that moved. The file watcher re-indexes the other notes whose links changed.
-async fn relink_and_reindex(state: &AppState, notes_root: &Path, moves: Vec<relink::Move>) {
-    let root = notes_root.to_path_buf();
-    let ignored = ignored_dirs(state);
-    let moved = match tauri::async_runtime::spawn_blocking(move || {
-        let moved = relink::relink_notes(&root, &moves, &ignored);
-        // After the relink, so private assets are found through the rewritten links.
-        if let Err(e) = vault::follow_moves(&root, &ignored, &moves) {
-            eprintln!("Failed to update private pages after a move: {e}");
-        }
-        moved
-    })
-    .await
-    {
-        Ok(moved) => moved,
-        Err(e) => {
-            eprintln!("Failed to update links after a move: {e}");
-            return;
-        }
-    };
+/// Re-indexes the notes that moved. The file watcher re-indexes the other
+/// notes whose links changed.
+fn reindex_moved(state: &AppState, notes_root: &Path, moved: &[relink::Moved]) {
     if let Some(index) = state.search_index.lock().expect("search index mutex").as_ref() {
-        if let Err(e) = index.reindex(notes_root, &moved) {
+        if let Err(e) = index.reindex(notes_root, moved) {
             eprintln!("Failed to update the search index after a move: {e}");
         }
     }
@@ -1211,88 +1215,15 @@ fn set_notes_folder(app: AppHandle, path: String, state: State<AppState>) -> Res
 
 #[tauri::command]
 async fn list_notes(state: State<'_, AppState>) -> Result<Vec<NoteMetadata>, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-
+    let folder = notes_folder(&state)?;
     let path = PathBuf::from(&folder);
     if !path.exists() {
         return Ok(vec![]);
     }
-
-    let ignored_dirs = {
-        let settings = state.settings.read().expect("settings read lock");
-        get_effective_ignored_dirs(&settings)
-    };
-
-    let path_clone = path.clone();
-    let discovered = tokio::task::spawn_blocking(move || {
-        use walkdir::WalkDir;
-        let mut results: Vec<(String, String, String, i64)> = Vec::new();
-        let mut folders: Vec<(String, i64)> = Vec::new();
-        for entry in WalkDir::new(&path_clone)
-            .max_depth(10)
-            .into_iter()
-            .filter_entry(|e| is_visible_notes_entry(e, &ignored_dirs))
-            .flatten()
-        {
-            let file_path = entry.path();
-            if entry.depth() > 0
-                && entry.file_type().is_dir()
-                && !entry.file_name().to_string_lossy().starts_with('.')
-            {
-                if let (Ok(rel), Ok(metadata)) =
-                    (file_path.strip_prefix(&path_clone), entry.metadata())
-                {
-                    let id = rel.to_string_lossy().replace('\\', "/");
-                    folders.push((id, modified_secs(&metadata)));
-                }
-            }
-            if !file_path.is_file() {
-                continue;
-            }
-            if let Some(id) = id_from_abs_path(&path_clone, file_path, &ignored_dirs) {
-                if let Ok(content) = std::fs::read_to_string(file_path) {
-                    let modified = entry
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    let title = extract_title(&content);
-                    let preview = generate_preview(&content);
-                    results.push((id, title, preview, modified));
-                }
-            }
-        }
-        // Exact names, as in sub_page_dir: on a case-insensitive file system
-        // `page/` next to `Page.md` is a bare page of its own.
-        let pages: HashSet<String> = results.iter().map(|(id, ..)| id.clone()).collect();
-        for (id, modified) in folders {
-            if !pages.contains(&id) {
-                let title = id.rsplit('/').next().unwrap_or(&id).to_string();
-                results.push((id, title, String::new(), modified));
-            }
-        }
-        results
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let mut notes: Vec<NoteMetadata> = discovered
-        .into_iter()
-        .map(|(id, title, preview, modified)| NoteMetadata {
-            id,
-            title,
-            preview,
-            modified,
-        })
-        .collect();
+    let ignored = ignored_dirs(&state);
+    let mut notes = tokio::task::spawn_blocking(move || notes::list(&path, &ignored))
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Load pinned note IDs from settings
     let pinned_ids: HashSet<String> = {
@@ -1330,50 +1261,11 @@ async fn list_notes(state: State<'_, AppState>) -> Result<Vec<NoteMetadata>, Str
 
 #[tauri::command]
 async fn read_note(id: String, state: State<'_, AppState>) -> Result<Note, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-
-    let folder_path = PathBuf::from(&folder);
-    let file_path = abs_path_from_id(&folder_path, &id)?;
-    if !file_path.exists() {
-        let dir = sub_page_dir(&folder_path, &id, &ignored_dirs(&state)).ok_or("Note not found")?;
-        let metadata = fs::metadata(&dir).await.map_err(|e| e.to_string())?;
-        let content = bare_page_markdown(&id);
-        return Ok(Note {
-            id,
-            title: extract_title(&content),
-            content,
-            path: file_path.to_string_lossy().into_owned(),
-            modified: modified_secs(&metadata),
-        });
-    }
-
-    let content = fs::read_to_string(&file_path)
+    let root = PathBuf::from(notes_folder(&state)?);
+    let ignored = ignored_dirs(&state);
+    tauri::async_runtime::spawn_blocking(move || notes::read(&root, &ignored, &id))
         .await
-        .map_err(|e| e.to_string())?;
-    let metadata = fs::metadata(&file_path)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    Ok(Note {
-        id,
-        title: extract_title(&content),
-        content,
-        path: file_path.to_string_lossy().into_owned(),
-        modified,
-    })
+        .map_err(|e| e.to_string())?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1414,139 +1306,27 @@ async fn save_note(
     content: String,
     state: State<'_, AppState>,
 ) -> Result<Note, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-    let folder_path = PathBuf::from(&folder);
-
-    let title = extract_title(&content);
-    let sanitized_leaf = sanitize_filename(&title);
-
-    // Determine the file ID and path, handling renames
-    let (final_id, file_path, old_id) = if let Some(existing_id) = id {
-        // Preserve directory prefix for notes in subfolders
-        let (dir_prefix, desired_id) = if let Some(pos) = existing_id.rfind('/') {
-            let prefix = &existing_id[..pos];
-            (Some(prefix.to_string()), format!("{}/{}", prefix, sanitized_leaf))
-        } else {
-            (None, sanitized_leaf.clone())
-        };
-
-        let old_file_path = abs_path_from_id(&folder_path, &existing_id)?;
-
-        if existing_id != desired_id {
-            let mut new_id = desired_id.clone();
-            let mut counter = 1;
-            let ignored = ignored_dirs(&state);
-            let sub_pages = sub_page_dir(&folder_path, &existing_id, &ignored);
-            let own: Vec<&Path> = [Some(old_file_path.as_path()), sub_pages.as_deref()]
-                .into_iter()
-                .flatten()
-                .collect();
-            // A page named like a folder the scanner skips would hide its sub-pages there
-            let hidden = |id: &str| is_hidden_dir(id.rsplit('/').next().unwrap_or(id), &ignored);
-
-            while new_id != existing_id
-                && (hidden(&new_id) || note_name_taken(&folder_path, &new_id, &own))
-            {
-                new_id = if let Some(ref prefix) = dir_prefix {
-                    format!("{}/{}-{}", prefix, sanitized_leaf, counter)
-                } else {
-                    format!("{}-{}", sanitized_leaf, counter)
-                };
-                counter += 1;
-            }
-
-            if new_id == existing_id {
-                (existing_id, old_file_path, None)
-            } else {
-                let new_file_path = abs_path_from_id(&folder_path, &new_id)?;
-                (new_id, new_file_path, Some((existing_id, old_file_path, sub_pages)))
-            }
-        } else {
-            (existing_id, old_file_path, None)
-        }
-    } else {
-        // New notes go in root
-        let mut new_id = sanitized_leaf.clone();
-        let mut counter = 1;
-
-        while note_name_taken(&folder_path, &new_id, &[]) {
-            new_id = format!("{}-{}", sanitized_leaf, counter);
-            counter += 1;
-        }
-
-        let new_file_path = abs_path_from_id(&folder_path, &new_id)?;
-        (new_id, new_file_path, None)
-    };
-
-    // A rename saves in place first, so a failed rename loses no edits
-    let write_path = old_id.as_ref().map_or(&file_path, |(_, old_path, _)| old_path);
-    fs::write(write_path, &content)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // A rename can rewrite links in this note too (links to itself)
-    let content = if let Some((ref old_id_str, ref old_file_path, ref sub_pages)) = old_id {
-        let new_dir = dir_from_id(&folder_path, &final_id);
-        rename_page(
-            old_file_path,
-            &file_path,
-            sub_pages.as_deref().map(|dir| (dir, new_dir.as_path())),
-        )
-        .map_err(|e| format!("Could not rename the note: {e}"))?;
-        let mut moves = vec![(format!("{}.md", old_id_str), format!("{}.md", final_id))];
-        if sub_pages.is_some() {
-            moves.push((old_id_str.clone(), final_id.clone()));
-        }
-        follow_moved_ids(&state, &folder, &moves);
-        relink_and_reindex(&state, &folder_path, moves).await;
-        fs::read_to_string(&file_path)
-            .await
-            .map_err(|e| e.to_string())?
-    } else {
-        content
-    };
-
-    let metadata = fs::metadata(&file_path)
-        .await
-        .map_err(|e| e.to_string())?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let (root, ignored) = (folder_path.clone(), ignored_dirs(&state));
-    let (id, markdown) = (final_id.clone(), content.clone());
-    if let Ok(Err(e)) = tauri::async_runtime::spawn_blocking(move || {
-        vault::page_saved(&root, &ignored, &id, &markdown)
+    let root = PathBuf::from(notes_folder(&state)?);
+    let ignored = ignored_dirs(&state);
+    let folder = root.clone();
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        notes::save(&folder, &ignored, id.as_deref(), &content)
     })
     .await
-    {
-        eprintln!("Failed to update private pages after a save: {e}");
-    }
+    .map_err(|e| e.to_string())??;
 
-    // A rename re-indexed the note with the notes that moved along
-    if old_id.is_none() {
+    if saved.moves.is_empty() {
+        let note = &saved.note;
         let index = state.search_index.lock().expect("search index mutex");
         if let Some(ref search_index) = *index {
-            let _ = search_index.index_note(&final_id, &title, &content, modified);
+            let _ = search_index.index_note(&note.id, &note.title, &note.content, note.modified);
         }
+    } else {
+        // A rename re-indexes the note with the notes that moved along
+        follow_moved_ids(&state, &root.to_string_lossy(), &saved.moves);
+        reindex_moved(&state, &root, &saved.moved);
     }
-
-    Ok(Note {
-        id: final_id,
-        title,
-        content,
-        path: file_path.to_string_lossy().into_owned(),
-        modified,
-    })
+    Ok(saved.note)
 }
 
 #[tauri::command]
@@ -1775,69 +1555,18 @@ async fn move_note(
     target_folder: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
-            .notes_folder
-            .clone()
-            .ok_or("Notes folder not set")?
-    };
-    let folder_root = PathBuf::from(&folder);
-    let source_path = abs_path_from_id(&folder_root, &id)?;
-    let sub_pages = sub_page_dir(&folder_root, &id, &ignored_dirs(&state));
-
-    if !source_path.exists() && sub_pages.is_none() {
-        return Err("Note not found".to_string());
+    let root = PathBuf::from(notes_folder(&state)?);
+    let ignored = ignored_dirs(&state);
+    let folder = root.clone();
+    let (new_id, moves, moved) = tauri::async_runtime::spawn_blocking(move || {
+        notes::move_page(&folder, &ignored, &id, &target_folder)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if !moves.is_empty() {
+        follow_moved_ids(&state, &root.to_string_lossy(), &moves);
+        reindex_moved(&state, &root, &moved);
     }
-
-    // Extract the filename (leaf) from the note ID
-    let leaf = id.rsplit('/').next().unwrap_or(&id);
-
-    // Build new ID
-    let new_id = if target_folder.is_empty() {
-        leaf.to_string()
-    } else {
-        validate_folder_path(&target_folder)?;
-        format!("{}/{}", target_folder, leaf)
-    };
-
-    if new_id == id {
-        return Ok(id);
-    }
-    if target_folder == id || target_folder.starts_with(&format!("{}/", id)) {
-        return Err("Cannot move a page into its own sub-pages".to_string());
-    }
-
-    let dest_path = abs_path_from_id(&folder_root, &new_id)?;
-    let sub_pages_dest = dir_from_id(&folder_root, &new_id);
-
-    // Ensure target directory exists
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
-    }
-
-    // Handle collision
-    if note_name_taken(&folder_root, &new_id, &[]) {
-        return Err("A note with that name already exists in the target folder".to_string());
-    }
-    create_bare_page_file(&folder_root, &id, &ignored_dirs(&state))?;
-
-    rename_page(
-        &source_path,
-        &dest_path,
-        sub_pages.as_deref().map(|dir| (dir, sub_pages_dest.as_path())),
-    )
-    .map_err(|e| e.to_string())?;
-
-    let mut moves = vec![(format!("{}.md", id), format!("{}.md", new_id))];
-    if sub_pages.is_some() {
-        moves.push((id.clone(), new_id.clone()));
-    }
-    remove_empty_sub_page_dir(&folder_root, parent_folder(&id));
-
-    follow_moved_ids(&state, &folder, &moves);
-    relink_and_reindex(&state, &folder_root, moves).await;
-
     Ok(new_id)
 }
 
@@ -2152,77 +1881,16 @@ async fn search_notes(query: String, state: State<'_, AppState>) -> Result<Vec<S
 
 // Fallback search when Tantivy index isn't available - searches title and full content
 async fn fallback_search(query: &str, state: &State<'_, AppState>) -> Result<Vec<SearchResult>, String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone()
+    let Ok(folder) = notes_folder(state) else {
+        return Ok(vec![]);
     };
-
-    let folder = match folder {
-        Some(f) => f,
-        None => return Ok(vec![]),
-    };
-
-    // Collect cache data upfront to avoid holding lock during async operations
-    let cache_data: Vec<(String, String, String, i64)> = {
-        let cache = state.notes_cache.read().expect("cache read lock");
-        cache
-            .values()
-            .map(|note| {
-                (
-                    note.id.clone(),
-                    note.title.clone(),
-                    note.preview.clone(),
-                    note.modified,
-                )
-            })
-            .collect()
-    };
-
-    let folder_path = PathBuf::from(&folder);
-    let query_lower = query.to_lowercase();
-    let mut results: Vec<SearchResult> = Vec::new();
-
-    for (id, title, mut preview, modified) in cache_data {
-        let title_lower = title.to_lowercase();
-
-        let mut score = 0.0f32;
-        if title_lower.contains(&query_lower) {
-            score += 50.0;
-        }
-
-        // Read file content asynchronously and search in it
-        let file_path = match abs_path_from_id(&folder_path, &id) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
-            // The query is one line of input, so a content match lies on one line
-            if let Some(line) = content.lines().find(|line| line.to_lowercase().contains(&query_lower)) {
-                preview = line.trim().to_string();
-                // Higher score if in title, lower if only in content
-                if score == 0.0 {
-                    score += 10.0;
-                } else {
-                    score += 5.0;
-                }
-            }
-        }
-
-        if score > 0.0 {
-            results.push(SearchResult {
-                id,
-                title,
-                preview,
-                modified,
-                score,
-            });
-        }
-    }
-
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(20);
-
-    Ok(results)
+    let ignored = ignored_dirs(state);
+    let query = query.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        notes::search(Path::new(&folder), &ignored, &query, 20)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // File watcher event payload
@@ -2240,12 +1908,22 @@ fn setup_file_watcher(
 ) -> Result<FileWatcherState, String> {
     let folder_path = PathBuf::from(notes_folder);
     let notes_root = folder_path.clone();
+    let settings_path = get_settings_path(notes_folder);
+    let settings_folder = notes_folder.to_string();
     let app_handle = app.clone();
 
     let watcher = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
                 for path in event.paths.iter() {
+                    if *path == settings_path {
+                        if let Some(state) = app_handle.try_state::<AppState>() {
+                            if reload_settings(&state.settings, &settings_folder) {
+                                let _ = app_handle.emit("settings-changed", ());
+                            }
+                        }
+                        continue;
+                    }
                     // Read current ignored patterns from settings
                     let ignored_dirs = if let Some(state) = app_handle.try_state::<AppState>() {
                         let settings = state.settings.read().expect("settings read lock");
@@ -3250,141 +2928,38 @@ fn check_cli_exists(command_name: &str, path: &str) -> Result<bool, String> {
     Ok(check_output.status.success())
 }
 
-/// Marker comment embedded in CLI wrapper scripts installed by Aether.
-/// Used to identify and validate our own wrapper before modifying or removing it.
-#[cfg(target_os = "macos")]
-const AETHER_CLI_MARKER: &str = "# AETHER_CLI_WRAPPER";
-
-/// Returns the path where the CLI script should be installed (macOS only).
-/// Checks PATH for Homebrew bin first, then falls back to architecture detection.
-/// Apple Silicon: /opt/homebrew/bin/aether
-/// Intel: /usr/local/bin/aether
-#[cfg(target_os = "macos")]
-fn cli_target_path() -> PathBuf {
-    // Check if the user's PATH contains /opt/homebrew/bin (Homebrew on Apple Silicon)
-    if let Ok(path_var) = std::env::var("PATH") {
-        if path_var.split(':').any(|p| p == "/opt/homebrew/bin") {
-            return PathBuf::from("/opt/homebrew/bin/aether");
-        }
-    }
-    // Fall back to architecture detection
-    if std::env::consts::ARCH == "aarch64" {
-        return PathBuf::from("/opt/homebrew/bin/aether");
-    }
-    PathBuf::from("/usr/local/bin/aether")
-}
-
 #[tauri::command]
 fn get_cli_status() -> Result<CliStatus, String> {
-    #[cfg(not(target_os = "macos"))]
-    return Ok(CliStatus { supported: false, installed: false, path: None });
-
-    #[cfg(target_os = "macos")]
-    {
-        let target = cli_target_path();
-        if !target.exists() && target.symlink_metadata().is_err() {
-            return Ok(CliStatus { supported: true, installed: false, path: None });
-        }
-        // Verify this is our wrapper (has marker) and points to the current binary
-        let content = std::fs::read_to_string(&target).unwrap_or_default();
-        if !content.contains(AETHER_CLI_MARKER) {
-            // Foreign binary at this path — don't claim it as ours
-            return Ok(CliStatus { supported: true, installed: false, path: None });
-        }
-        let current_exe = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if !current_exe.is_empty() && !content.contains(&current_exe) {
-            // Our wrapper but points to a moved/deleted binary — needs reinstall
-            return Ok(CliStatus { supported: true, installed: false, path: None });
-        }
-        Ok(CliStatus {
-            supported: true,
-            installed: true,
-            path: Some(target.to_string_lossy().into_owned()),
-        })
-    }
+    let target = install::cli_target()?;
+    let installed = install::bundled_cli().is_ok_and(|cli| install::cli_installed(&target, &cli));
+    Ok(CliStatus {
+        installed,
+        path: installed.then(|| target.to_string_lossy().into_owned()),
+    })
 }
 
 #[tauri::command]
 fn install_cli() -> Result<String, String> {
-    #[cfg(not(target_os = "macos"))]
-    return Err("CLI install is only supported on macOS".to_string());
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let target = cli_target_path();
-
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
-        }
-
-        if target.exists() || target.symlink_metadata().is_ok() {
-            // Only remove if it's our wrapper (contains marker)
-            let content = std::fs::read_to_string(&target).unwrap_or_default();
-            if !content.contains(AETHER_CLI_MARKER) {
-                return Err(format!(
-                    "A different 'aether' command already exists at {}. Remove it manually to install the Aether CLI.",
-                    target.display()
-                ));
-            }
-            std::fs::remove_file(&target)
-                .map_err(|e| format!("Failed to remove existing file: {}", e))?;
-        }
-
-        let exe_path = std::env::current_exe()
-            .map_err(|e| format!("Cannot find exe path: {}", e))?;
-
-        // Shell-escape the exe path using single quotes to prevent
-        // interpretation of $, `, ", and other metacharacters.
-        let exe_str = exe_path.to_string_lossy();
-        let escaped_exe = format!("'{}'", exe_str.replace('\'', "'\\''"));
-
-        // Write a wrapper script that launches the binary in the background so
-        // the terminal is not blocked waiting for the GUI app to exit.
-        let script = format!(
-            "#!/bin/sh\n{}\nnohup {} \"$@\" >/dev/null 2>&1 &\n",
-            AETHER_CLI_MARKER,
-            escaped_exe
-        );
-        std::fs::write(&target, script.as_bytes())
-            .map_err(|e| format!("Failed to write CLI script: {}", e))?;
-
-        let mut perms = std::fs::metadata(&target)
-            .map_err(|e| format!("Failed to read permissions: {}", e))?
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&target, perms)
-            .map_err(|e| format!("Failed to set permissions: {}", e))?;
-
-        Ok(target.to_string_lossy().into_owned())
-    }
+    let target = install::cli_target()?;
+    install::install_cli(&target, &install::bundled_cli()?)?;
+    Ok(target.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
 fn uninstall_cli() -> Result<(), String> {
-    #[cfg(not(target_os = "macos"))]
-    return Ok(());
+    install::uninstall_cli(&install::cli_target()?)
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        let target = cli_target_path();
-        if target.exists() || target.symlink_metadata().is_ok() {
-            let content = std::fs::read_to_string(&target).unwrap_or_default();
-            if !content.contains(AETHER_CLI_MARKER) {
-                return Err(format!(
-                    "File at {} was not installed by Aether. Refusing to remove.",
-                    target.display()
-                ));
-            }
-            std::fs::remove_file(&target)
-                .map_err(|e| format!("Failed to remove CLI script: {}", e))?;
-        }
-        Ok(())
-    }
+#[tauri::command]
+fn get_skill_status() -> Result<install::SkillStatus, String> {
+    let home = dirs::home_dir().ok_or("Cannot find the home folder")?;
+    Ok(install::skill_status(&home))
+}
+
+#[tauri::command]
+fn install_skill() -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("Cannot find the home folder")?;
+    install::install_skill(&home)
 }
 
 #[tauri::command]
@@ -4055,7 +3630,7 @@ fn handle_cli_args(app: &AppHandle, args: &[String], cwd: &str) -> bool {
                 opened_preview = true;
             }
         } else if path.is_dir() {
-            let canonical = path.canonicalize().unwrap_or(path.clone());
+            let canonical = dunce::canonicalize(&path).unwrap_or(path.clone());
             let state = app.state::<AppState>();
             // Full initialization: directory creation, write-access check,
             // asset-scope update, config/settings persist, and search-index rebuild
@@ -4128,6 +3703,13 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            #[cfg(windows)]
+            std::thread::spawn(|| {
+                if let Err(e) = install::refresh_cli() {
+                    eprintln!("Failed to update the installed CLI: {e}");
+                }
+            });
+
             // Load app config on startup (contains notes folder path)
             let mut app_config = load_app_config(app.handle());
 
@@ -4321,6 +3903,8 @@ pub fn run() {
             install_cli,
             uninstall_cli,
             get_cli_status,
+            get_skill_status,
+            install_skill,
             set_title_bar_theme,
         ])
         .build(tauri::generate_context!())

@@ -14,11 +14,10 @@ import { AI_PROVIDER_ORDER, type AiProvider } from "../../services/ai";
 import * as aiService from "../../services/ai";
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
-import type { CliStatus } from "../../services/cli";
+import type { CliStatus, SkillStatus } from "../../services/cli";
 
 type CliState = {
   status: CliStatus | null;
-  loaded: boolean;
   error: boolean;
   operating: boolean;
 };
@@ -32,7 +31,6 @@ type CliAction =
 
 const cliInitialState: CliState = {
   status: null,
-  loaded: false,
   error: false,
   operating: false,
 };
@@ -40,7 +38,7 @@ const cliInitialState: CliState = {
 function cliReducer(state: CliState, action: CliAction): CliState {
   switch (action.type) {
     case "loaded":
-      return { ...state, status: action.status, loaded: true, error: false };
+      return { ...state, status: action.status, error: false };
     case "error":
       return { ...state, error: true };
     case "operating":
@@ -61,8 +59,107 @@ function CliUsageHint() {
       <br />
       aether . # open folder
       <br />
-      aether # launch app
+      aether search "query" # find pages
+      <br />
+      aether --help # every command
     </p>
+  );
+}
+
+const SKILL_STATUS_LABEL: Record<SkillStatus, string> = {
+  installed: "Installed",
+  update_available: "Update available",
+  not_installed: "Not installed",
+};
+
+function AgentSkillSection() {
+  const [status, setStatus] = useState<SkillStatus | "error" | null>(null);
+  const [installing, setInstalling] = useState(false);
+
+  useEffect(() => {
+    cliService
+      .getSkillStatus()
+      .then(setStatus)
+      .catch((err) => {
+        console.error("Failed to get agent skill status:", err);
+        setStatus("error");
+      });
+  }, []);
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    try {
+      await cliService.installSkill();
+      setStatus(await cliService.getSkillStatus());
+      toast.success("Agent skill installed.");
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to install agent skill",
+      );
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  return (
+    <section className="pb-2">
+      <h2 className="text-xl font-medium mb-0.5">Agent Skill</h2>
+      <p className="text-sm text-text-muted mb-4">
+        Teaches Claude Code, Codex, and other agents to use the{" "}
+        <code className="font-mono text-xs bg-bg-muted px-1.5 py-0.5 rounded">
+          aether
+        </code>{" "}
+        command when you ask them to work with your notes. Needs the CLI tool.
+      </p>
+
+      {status === "error" ? (
+        <div className="bg-red-500/10 border border-red-500/20 rounded-md p-3">
+          <p className="text-sm text-red-500">
+            Failed to check the agent skill. Please restart the app.
+          </p>
+        </div>
+      ) : status === null ? (
+        <div className="rounded-[10px] border border-border p-4 flex items-center justify-center">
+          <SpinnerIcon className="w-4.5 h-4.5 stroke-[1.5] animate-spin text-text-muted" />
+        </div>
+      ) : (
+        <>
+          <div className="rounded-[10px] border border-border p-4 space-y-3 mb-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text font-medium">Status</span>
+              <span className="text-sm text-text-muted">
+                {SKILL_STATUS_LABEL[status]}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text font-medium">Folders</span>
+              <span className="text-xs font-mono text-text-muted">
+                ~/.claude/skills, ~/.agents/skills
+              </span>
+            </div>
+          </div>
+          {status !== "installed" && (
+            <Button
+              onClick={handleInstall}
+              disabled={installing}
+              variant="outline"
+              size="md"
+            >
+              {installing ? (
+                <>
+                  <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
+                  Installing...
+                </>
+              ) : status === "update_available" ? (
+                "Update Agent Skill"
+              ) : (
+                "Install Agent Skill"
+              )}
+            </Button>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -204,109 +301,104 @@ export function ToolsSettingsSection() {
         )}
       </section>
 
-      {/* CLI Tool (macOS only) */}
-      {(cli.loaded && cli.status?.supported) || cli.error ? (
-        <>
-          <div className="border-t border-border border-dashed" />
+      <div className="border-t border-border border-dashed" />
 
-          <section className="pb-2">
-            <h2 className="text-xl font-medium mb-0.5">CLI Tool</h2>
-            <p className="text-sm text-text-muted mb-4">
-              Open notes from the terminal with the{" "}
-              <code className="font-mono text-xs bg-bg-muted px-1.5 py-0.5 rounded">
-                aether
-              </code>{" "}
-              command
+      <section className="pb-2">
+        <h2 className="text-xl font-medium mb-0.5">CLI Tool</h2>
+        <p className="text-sm text-text-muted mb-4">
+          Open, read, and edit notes from the terminal with the{" "}
+          <code className="font-mono text-xs bg-bg-muted px-1.5 py-0.5 rounded">
+            aether
+          </code>{" "}
+          command
+        </p>
+
+        {cli.error ? (
+          <div className="bg-red-500/10 border border-red-500/20 rounded-md p-3">
+            <p className="text-sm text-red-500">
+              Failed to check CLI status. Please restart the app.
             </p>
+          </div>
+        ) : cli.status === null ? (
+          <div className="rounded-[10px] border border-border p-4 flex items-center justify-center">
+            <SpinnerIcon className="w-4.5 h-4.5 stroke-[1.5] animate-spin text-text-muted" />
+          </div>
+        ) : cli.status.installed ? (
+          <>
+            <div className="rounded-[10px] border border-border p-4 space-y-3 mb-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-text font-medium">Status</span>
+                <span className="text-sm text-text-muted">Installed</span>
+              </div>
+              {cli.status.path && (
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-text font-medium">Path</span>
+                  <button
+                    type="button"
+                    className="text-xs font-mono text-text-muted bg-bg-muted px-2 py-0.5 rounded max-w-48 truncate cursor-pointer hover:bg-bg-hover transition-colors"
+                    title="Click to copy path"
+                    onClick={async () => {
+                      try {
+                        await invoke("copy_to_clipboard", {
+                          text: cli.status!.path!,
+                        });
+                        toast.success("Path copied to clipboard");
+                      } catch {
+                        toast.error("Failed to copy path");
+                      }
+                    }}
+                  >
+                    {cli.status.path}
+                  </button>
+                </div>
+              )}
+              <div className="pt-3 border-t border-border border-dashed">
+                <CliUsageHint />
+              </div>
+            </div>
+            <Button
+              onClick={handleUninstallCli}
+              disabled={cli.operating}
+              variant="outline"
+              size="md"
+            >
+              {cli.operating ? (
+                <>
+                  <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
+                  Uninstalling...
+                </>
+              ) : (
+                "Uninstall CLI Tool"
+              )}
+            </Button>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center gap-2.5 p-2.5 rounded-[10px] border border-border bg-bg-secondary mb-2.5">
+              <CliUsageHint />
+            </div>
+            <Button
+              onClick={handleInstallCli}
+              disabled={cli.operating}
+              variant="outline"
+              size="md"
+            >
+              {cli.operating ? (
+                <>
+                  <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
+                  Installing...
+                </>
+              ) : (
+                "Install CLI Tool"
+              )}
+            </Button>
+          </>
+        )}
+      </section>
 
-            {cli.error ? (
-              <div className="bg-red-500/10 border border-red-500/20 rounded-md p-3">
-                <p className="text-sm text-red-500">
-                  Failed to check CLI status. Please restart the app.
-                </p>
-              </div>
-            ) : cli.status === null ? (
-              <div className="rounded-[10px] border border-border p-4 flex items-center justify-center">
-                <SpinnerIcon className="w-4.5 h-4.5 stroke-[1.5] animate-spin text-text-muted" />
-              </div>
-            ) : cli.status.installed ? (
-              <>
-                <div className="rounded-[10px] border border-border p-4 space-y-3 mb-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-text font-medium">
-                      Status
-                    </span>
-                    <span className="text-sm text-text-muted">Installed</span>
-                  </div>
-                  {cli.status.path && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-text font-medium">
-                        Path
-                      </span>
-                      <button
-                        type="button"
-                        className="text-xs font-mono text-text-muted bg-bg-muted px-2 py-0.5 rounded max-w-48 truncate cursor-pointer hover:bg-bg-hover transition-colors"
-                        title="Click to copy path"
-                        onClick={async () => {
-                          try {
-                            await invoke("copy_to_clipboard", {
-                              text: cli.status!.path!,
-                            });
-                            toast.success("Path copied to clipboard");
-                          } catch {
-                            toast.error("Failed to copy path");
-                          }
-                        }}
-                      >
-                        {cli.status.path}
-                      </button>
-                    </div>
-                  )}
-                  <div className="pt-3 border-t border-border border-dashed">
-                    <CliUsageHint />
-                  </div>
-                </div>
-                <Button
-                  onClick={handleUninstallCli}
-                  disabled={cli.operating}
-                  variant="outline"
-                  size="md"
-                >
-                  {cli.operating ? (
-                    <>
-                      <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
-                      Uninstalling...
-                    </>
-                  ) : (
-                    "Uninstall CLI Tool"
-                  )}
-                </Button>
-              </>
-            ) : (
-              <>
-                <div className="flex items-center gap-2.5 p-2.5 rounded-[10px] border border-border bg-bg-secondary mb-2.5">
-                  <CliUsageHint />
-                </div>
-                <Button
-                  onClick={handleInstallCli}
-                  disabled={cli.operating}
-                  variant="outline"
-                  size="md"
-                >
-                  {cli.operating ? (
-                    <>
-                      <SpinnerIcon className="w-3.25 h-3.25 mr-2 animate-spin" />
-                      Installing...
-                    </>
-                  ) : (
-                    "Install CLI Tool"
-                  )}
-                </Button>
-              </>
-            )}
-          </section>
-        </>
-      ) : null}
+      <div className="border-t border-border border-dashed" />
+
+      <AgentSkillSection />
     </div>
   );
 }

@@ -1885,3 +1885,30 @@ fn get_note_info_reports_the_file_birth_time_when_the_platform_has_one() {
     ))
     .is_err());
 }
+
+#[test]
+fn reload_settings_takes_in_pins_written_on_disk_and_skips_a_partial_file() {
+    let notes = TestNotes::new();
+    let folder = notes.root().to_string_lossy().into_owned();
+    let state = notes.state();
+    let pins = || state.settings.read().expect("settings").pinned_note_ids.clone();
+    state.settings.write().expect("settings").pinned_note_ids = Some(vec!["Old".into()]);
+
+    let written = crate::Settings {
+        pinned_note_ids: Some(vec!["New".into()]),
+        ..Default::default()
+    };
+    let written = serde_json::to_string_pretty(&written).expect("settings json");
+    notes.write(".aether/settings.json", &written);
+    assert!(crate::reload_settings(&state.settings, &folder));
+    assert_eq!(pins(), Some(vec!["New".to_string()]));
+
+    // The app's own save of the same settings changes nothing
+    assert!(!crate::reload_settings(&state.settings, &folder));
+
+    // A file caught mid-write keeps the settings in memory
+    notes.write(".aether/settings.json", &written[..written.len() / 2]);
+    assert!(!crate::reload_settings(&state.settings, &folder));
+    assert_eq!(pins(), Some(vec!["New".to_string()]));
+    notes.save_artifact("reload_settings_takes_in_pins_written_on_disk_and_skips_a_partial_file");
+}

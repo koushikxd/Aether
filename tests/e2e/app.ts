@@ -107,6 +107,14 @@ export class AetherApp {
     );
   }
 
+  /** Writes a note's file as another program (the CLI) would, and reports it like the watcher. */
+  async writeExternally(path: string, content: string) {
+    await this.page.evaluate(
+      ([file, text]) => window.aetherFake?.writeExternally(file, text),
+      [path, content] as const,
+    );
+  }
+
   /** Makes the next file-picker dialog return this path (or paths). */
   async pickFile(path: string | string[]) {
     await this.page.evaluate((picked) => {
@@ -122,6 +130,14 @@ export class AetherApp {
   /** Runs the held calls to `cmd` in order and stops holding it. */
   async release(cmd: string) {
     await this.page.evaluate((name) => window.aetherFake?.release(name), cmd);
+  }
+
+  /** Answers the latest held call to `cmd` while the earlier ones keep waiting. */
+  async releaseLatest(cmd: string) {
+    await this.page.evaluate(
+      (name) => window.aetherFake?.releaseLatest(name),
+      cmd,
+    );
   }
 
   /** Every backend call so far, optionally filtered by command name. */

@@ -337,7 +337,11 @@ fn load(root: &Path) -> Result<Local, String> {
     match fs::read_to_string(local_path(root)) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|_| "This device's private pages state is damaged".to_string()),
-        Err(_) => Ok(Local::default()),
+        // No store: no marks yet, or `.git` is a worktree or submodule pointer file
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || !root.join(".git").is_dir() => {
+            Ok(Local::default())
+        }
+        Err(_) => Err("This device's private pages state could not be read".to_string()),
     }
 }
 
@@ -409,6 +413,12 @@ impl PrivateSet {
 
     pub fn contains_dir(&self, dir: &str) -> bool {
         self.roots.iter().any(|r| dir == r || inside(dir, r))
+    }
+
+    /// Whether public note `path` (`<id>.md`) links to a private page, by a
+    /// relative link or a `[[Title]]` wikilink.
+    pub fn linked_from_public(&self, path: &str) -> bool {
+        self.linked_from_public.contains(path)
     }
 
     /// The private files that exist on disk.

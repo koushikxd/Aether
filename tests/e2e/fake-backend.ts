@@ -1,6 +1,7 @@
 // Runs in the browser before the app (injected by tests/e2e/app.ts).
 // Fakes the Tauri backend with an in-memory notes folder.
 import { emit } from "@tauri-apps/api/event";
+import { integrationsHandlers } from "./fake-integrations";
 import { mergeHandlers } from "./fake-merge";
 import { vaultHandlers } from "./fake-vault";
 import {
@@ -30,11 +31,15 @@ export interface FakeBackend {
   /** Holds calls to `cmd` (a slow backend) until `release(cmd)` runs them in order. */
   hold: (cmd: string) => void;
   release: (cmd: string) => void;
+  /** Answers only the most recent held call to `cmd`, ahead of earlier ones. */
+  releaseLatest: (cmd: string) => void;
   emit: (event: string, payload: unknown) => Promise<void>;
   /** Birth time `get_note_info` reports for every note (null = the platform has none). */
   noteCreated: number | null;
   /** Ms `move_note` takes after the watcher reports the move (0 = no report). */
   moveLag: number;
+  /** Writes a note's file as another program would, and reports it like the watcher. */
+  writeExternally: (path: string, content: string) => Promise<void>;
 }
 
 declare global {
@@ -583,10 +588,17 @@ const fake: FakeBackend = {
     held.delete(cmd);
     waiting.forEach((run) => run());
   },
+  releaseLatest: (cmd) => {
+    held.get(cmd)?.pop()?.();
+  },
   emit,
   // 2026-03-15 12:00 UTC: the same calendar day in every time zone.
   noteCreated: 1773576000,
   moveLag: 0,
+  writeExternally: (path, content) => {
+    writeFile(path, content);
+    return emit("file-change", { changed_ids: [path.replace(/\.md$/, "")] });
+  },
 };
 
 const handlers: Record<string, Handler> = {
@@ -699,6 +711,7 @@ const handlers: Record<string, Handler> = {
   "plugin:window|close": () => null,
   ...vaultHandlers({ files, writeFile, createBarePageFile }),
   ...mergeHandlers({ files, writeFile, createBarePageFile }),
+  ...integrationsHandlers(),
 };
 
 mockWindows("main");
