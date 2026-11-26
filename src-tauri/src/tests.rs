@@ -2007,3 +2007,20 @@ fn mailbox_files_older_than_the_limit_are_pruned() {
     assert!(!old.exists());
     assert!(fresh.exists());
 }
+
+#[test]
+fn an_agent_request_is_refused_when_git_is_turned_off_for_the_folder() {
+    use crate::agent_git::{Action, Outcome, Request};
+    let notes = TestNotes::new();
+    notes.state().settings.write().expect("settings").git_enabled = Some(false);
+    let request = Request {
+        folder: notes.root().to_path_buf(),
+        action: Action::Commit,
+        message: None,
+    };
+
+    let reply = crate::run_agent_request(&notes.state(), &request);
+
+    assert_eq!(reply.outcome, Outcome::Error, "{reply:?}");
+    assert!(reply.message.contains("turned off"), "{}", reply.message);
+}

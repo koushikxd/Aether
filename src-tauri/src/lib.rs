@@ -2508,9 +2508,16 @@ async fn open_url_safe(url: String) -> Result<(), String> {
 
 /// Runs an agent CLI request on the open notes folder.
 fn run_agent_request(state: &AppState, request: &agent_git::Request) -> agent_git::Reply {
+    // After the lock, so a request that waited sees the folder open now.
+    let _git = lock_git(&state.git_lock);
+    let git_enabled = state.settings.read().expect("settings read lock").git_enabled;
+    if git_enabled == Some(false) {
+        return agent_git::Reply::error(
+            "Git is turned off for this notes folder in Aether's settings",
+        );
+    }
     let root = notes_folder(state).ok().map(PathBuf::from);
     let ignored = ignored_dirs(state);
-    let _git = lock_git(&state.git_lock);
     agent_git::handle(request, root.as_deref(), &ignored, state.key_store.as_ref())
 }
 
