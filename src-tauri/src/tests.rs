@@ -2024,3 +2024,31 @@ fn an_agent_request_is_refused_when_git_is_turned_off_for_the_folder() {
     assert_eq!(reply.outcome, Outcome::Error, "{reply:?}");
     assert!(reply.message.contains("turned off"), "{}", reply.message);
 }
+
+#[test]
+fn an_agent_request_forwarded_while_the_app_starts_is_answered_once_it_has_started() {
+    use crate::agent_git::{self, Action, Request};
+    use std::time::Duration;
+    use tauri::Manager;
+    let mailbox = tempfile::TempDir::new().expect("mailbox");
+    let mailbox_path = mailbox.path().to_path_buf();
+    let id = agent_git::new_id();
+    let request = Request {
+        folder: mailbox_path.clone(),
+        action: Action::Commit,
+        message: None,
+    };
+    agent_git::write_json(&agent_git::request_file(&mailbox_path, &id), &request)
+        .expect("write request");
+    let app = tauri::test::mock_app();
+    let handle = app.handle().clone();
+    let (worker_mailbox, worker_id) = (mailbox_path.clone(), id.clone());
+
+    let worker =
+        std::thread::spawn(move || crate::answer_agent_request(&handle, &worker_mailbox, &worker_id));
+    std::thread::sleep(Duration::from_millis(200));
+    app.manage(crate::AppState::default());
+
+    assert!(worker.join().is_ok(), "the request handler panicked");
+    assert!(agent_git::reply_file(&mailbox_path, &id).is_file());
+}

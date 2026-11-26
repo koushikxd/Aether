@@ -2543,16 +2543,19 @@ async fn with_git<T: Send + 'static>(
 /// Takes request `id` from the mailbox, runs it, and writes the reply. The
 /// frontend then refreshes its git state, and a hand-off brings the window
 /// forward with the merge editor.
-fn answer_agent_request(app: &AppHandle, id: &str) {
-    let mailbox = match agent_git::mailbox() {
-        Ok(mailbox) => mailbox,
-        Err(e) => return eprintln!("Agent request {id}: {e}"),
+fn answer_agent_request<R: tauri::Runtime>(app: &AppHandle<R>, mailbox: &Path, id: &str) {
+    // A request forwarded while the app starts arrives before setup manages the state.
+    let state = loop {
+        match app.try_state::<AppState>() {
+            Some(state) => break state,
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
     };
-    let reply = match agent_git::take_request(&mailbox, id) {
-        Ok(request) => run_agent_request(&app.state::<AppState>(), &request),
+    let reply = match agent_git::take_request(mailbox, id) {
+        Ok(request) => run_agent_request(&state, &request),
         Err(e) => agent_git::Reply::error(e),
     };
-    if let Err(e) = agent_git::write_json(&agent_git::reply_file(&mailbox, id), &reply) {
+    if let Err(e) = agent_git::write_json(&agent_git::reply_file(mailbox, id), &reply) {
         eprintln!("Agent request {id}: could not reply: {e}");
     }
     let _ = app.emit("git-state-changed", ());
@@ -3647,8 +3650,15 @@ fn open_file_preview(app: AppHandle, path: String) -> Result<(), String> {
 // Returns true if a standalone preview window was created (file outside notes folder).
 fn handle_cli_args(app: &AppHandle, args: &[String], cwd: &str) -> bool {
     if let Some(id) = agent_git::request_id(args) {
+        let mailbox = match agent_git::mailbox() {
+            Ok(mailbox) => mailbox,
+            Err(e) => {
+                eprintln!("Agent request {id}: {e}");
+                return false;
+            }
+        };
         let (app, id) = (app.clone(), id.to_string());
-        tauri::async_runtime::spawn_blocking(move || answer_agent_request(&app, &id));
+        tauri::async_runtime::spawn_blocking(move || answer_agent_request(&app, &mailbox, &id));
         return false;
     }
     let mut opened_file = false;
