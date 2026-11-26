@@ -5,8 +5,8 @@
 //! any command that touches one fails with "path unavailable", naming
 //! nothing private.
 
-use aether_lib::install;
 use aether_lib::notes::{self, PrivateSet};
+use aether_lib::{agent_git, install};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -98,6 +98,8 @@ enum PageCommand {
         #[arg(long, value_name = "PAGE")]
         to: String,
     },
+    /// Show the branch, changed pages, private changes as a count, and any merge in progress
+    Status,
 }
 
 enum Failure {
@@ -648,6 +650,56 @@ fn check(folder: &Folder) -> Result<Report, Failure> {
     Ok(Report { json, text })
 }
 
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn status(folder: &Folder) -> Result<Report, Failure> {
+    // The app may be committing: a status that refreshed the index could get in its way.
+    std::env::set_var("GIT_OPTIONAL_LOCKS", "0");
+    let status = agent_git::status(&folder.root, &folder.ignored).map_err(Failure::Other)?;
+    let mut lines = vec![match (&status.branch, status.ahead, status.behind) {
+        (Some(branch), Some(ahead), Some(behind)) => {
+            format!("on {branch}, {ahead} ahead and {behind} behind")
+        }
+        (Some(branch), _, _) => format!("on {branch}, with no upstream"),
+        (None, _, _) => "on no branch".to_string(),
+    }];
+    if !status.changed_pages.is_empty() {
+        lines.push(format!(
+            "changed pages: {}",
+            status.changed_pages.join(", ")
+        ));
+    }
+    if status.other_changes > 0 {
+        lines.push(plural(
+            status.other_changes,
+            "other changed file",
+            "other changed files",
+        ));
+    }
+    if status.private_changes > 0 {
+        lines.push(plural(
+            status.private_changes,
+            "private change",
+            "private changes",
+        ));
+    }
+    if status.merge_in_progress {
+        lines.push("a sync is stopped on conflicts: fix them, then run aether sync --continue, or aether sync --abort".to_string());
+    }
+    if status.sync_blocked {
+        lines.push(
+            "sync waits until the private changes are committed: run aether commit".to_string(),
+        );
+    }
+    let json = serde_json::to_value(&status).map_err(|e| Failure::Other(e.to_string()))?;
+    Ok(Report {
+        json,
+        text: lines.iter().map(|line| format!("{line}\n")).collect(),
+    })
+}
+
 /// The app's executable, next to the real CLI binary (inside the bundle on
 /// macOS) whatever symlink on PATH started it, or named by the file beside a copy.
 fn app_executable() -> Result<PathBuf, Failure> {
@@ -749,6 +801,7 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         PageCommand::Append { page } => append(&folder, &page),
         PageCommand::Edit { page, if_match } => edit(&folder, &page, &if_match),
         PageCommand::Move { page, to } => move_page(&folder, &page, &to),
+        PageCommand::Status => status(&folder),
     }
 }
 

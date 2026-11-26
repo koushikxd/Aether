@@ -96,6 +96,60 @@ impl From<GitResult> for Reply {
     }
 }
 
+/// The git state of a notes folder, with private files left out of the
+/// changes and counted instead.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub branch: Option<String>,
+    /// Commits the upstream lacks; none without an upstream.
+    pub ahead: Option<i32>,
+    pub behind: Option<i32>,
+    pub changed_pages: Vec<String>,
+    /// Changed files that are not pages, such as assets and settings.
+    pub other_changes: usize,
+    pub private_changes: usize,
+    pub merge_in_progress: bool,
+    /// Whether `sync` refuses until the private changes are committed.
+    pub sync_blocked: bool,
+}
+
+/// Needs no key, so the CLI computes it itself, with the app closed too.
+pub fn status(root: &Path, ignored: &[String]) -> Result<Status, String> {
+    let git = git::get_status(root);
+    if !git.is_repo {
+        return Err(
+            "the notes folder has no git repository: set up git in Aether first".to_string(),
+        );
+    }
+    let private = vault::current_private_set(root, ignored)?;
+    let mut changed_pages = Vec::new();
+    let mut other_changes = 0;
+    for path in git::changed_paths(root)? {
+        if private.contains(&path) {
+            continue;
+        }
+        match crate::id_from_abs_path(root, &crate::dir_from_id(root, &path), ignored) {
+            Some(id) => changed_pages.push(id),
+            None => other_changes += 1,
+        }
+    }
+    changed_pages.sort();
+    changed_pages.dedup();
+    let private_changes = vault::pending_count(root, ignored);
+    let upstream = |count: i32| git.has_upstream.then_some(count);
+    Ok(Status {
+        branch: git.current_branch,
+        ahead: upstream(git.ahead_count),
+        behind: upstream(git.behind_count),
+        changed_pages,
+        other_changes,
+        private_changes,
+        merge_in_progress: git::merge_in_progress(root),
+        sync_blocked: private_changes > 0,
+    })
+}
+
 /// Runs `request` on `open`, the notes folder open in the app, and returns
 /// a reply that names nothing private.
 pub fn handle(

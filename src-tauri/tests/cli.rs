@@ -1153,3 +1153,126 @@ fn a_command_name_wins_over_a_folder_with_that_name() {
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(ids(&json(&out), "pages"), ["Page", "list", "list/Inner"]);
 }
+
+/// Runs git in `dir` with a test identity, panicking when it fails.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A notes folder on branch `main` with `files` committed.
+fn committed_notes(files: &[(&str, &str)]) -> TempDir {
+    let notes = notes_folder(files);
+    git(notes.path(), &["checkout", "-q", "-b", "main"]);
+    git(notes.path(), &["add", "-A"]);
+    git(notes.path(), &["commit", "-q", "-m", "start"]);
+    notes
+}
+
+#[test]
+fn status_lists_public_changes_by_id_and_private_ones_as_a_count() {
+    let mut cli = Cli::new("status_lists_public_changes_by_id_and_private_ones_as_a_count");
+    let notes = committed_notes(&[("Public.md", "# Public\n"), ("Public/Sub.md", "# Sub\n")]);
+    write(notes.path(), "Public.md", "# Public\n\nedited\n");
+    write(notes.path(), "New.md", "# New\n");
+    write(notes.path(), "assets/x.png", "png");
+    write(notes.path(), "Secret.md", "# Secret\n");
+    write(notes.path(), "Secret/Child.md", "# Child\n");
+    mark_private(notes.path(), &["Secret"]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&["--folder", folder, "--json", "status"]);
+    let text = cli.run(&["--folder", folder, "status"]);
+
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        json(&out),
+        serde_json::json!({
+            "branch": "main",
+            "ahead": null,
+            "behind": null,
+            "changedPages": ["New", "Public"],
+            "otherChanges": 1,
+            // Two files and the new mark, as the app counts them
+            "privateChanges": 3,
+            "mergeInProgress": false,
+            "syncBlocked": true,
+        })
+    );
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(text.stdout.contains("New, Public"), "{}", text.stdout);
+    for out in [&out, &text] {
+        for private in ["Secret", "Child"] {
+            assert!(!out.stdout.contains(private), "{}", out.stdout);
+        }
+    }
+}
+
+#[test]
+fn status_reports_ahead_behind_and_a_merge_in_progress() {
+    let mut cli = Cli::new("status_reports_ahead_behind_and_a_merge_in_progress");
+    let remote = TempDir::new().expect("remote");
+    git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let notes = committed_notes(&[("Home.md", "# Home\n")]);
+    let url = remote.path().to_str().expect("utf-8 path");
+    git(notes.path(), &["remote", "add", "origin", url]);
+    git(notes.path(), &["push", "-q", "-u", "origin", "main"]);
+    git(notes.path(), &["checkout", "-q", "-b", "other"]);
+    write(notes.path(), "Home.md", "# Home\n\nfrom other\n");
+    git(notes.path(), &["commit", "-q", "-am", "other"]);
+    git(notes.path(), &["checkout", "-q", "main"]);
+    write(notes.path(), "Home.md", "# Home\n\nfrom main\n");
+    git(notes.path(), &["commit", "-q", "-am", "main"]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let ahead = cli.run(&["--folder", folder, "--json", "status"]);
+    let merge = Command::new("git")
+        .args(["merge", "-q", "other"])
+        .current_dir(notes.path())
+        .output()
+        .expect("run git merge");
+    assert!(!merge.status.success(), "the merge should conflict");
+    let merging = cli.run(&["--folder", folder, "--json", "status"]);
+    let text = cli.run(&["--folder", folder, "status"]);
+
+    assert_eq!(ahead.code, 0, "{}", ahead.stderr);
+    let ahead = json(&ahead);
+    assert_eq!(
+        (ahead["ahead"].clone(), ahead["behind"].clone()),
+        (1.into(), 0.into())
+    );
+    assert_eq!(ahead["mergeInProgress"], false);
+    assert_eq!(ahead["syncBlocked"], false);
+    let merging = json(&merging);
+    assert_eq!(merging["mergeInProgress"], true);
+    assert_eq!(merging["changedPages"], serde_json::json!(["Home"]));
+    assert!(
+        text.stdout.contains("aether sync --continue"),
+        "{}",
+        text.stdout
+    );
+}
+
+#[test]
+fn status_outside_a_git_repository_is_an_error() {
+    let mut cli = Cli::new("status_outside_a_git_repository_is_an_error");
+    let notes = TempDir::new().expect("notes folder");
+    write(notes.path(), "Page.md", "# Page\n");
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&["--folder", folder, "--json", "status"]);
+
+    assert_eq!(out.code, 1);
+    assert_eq!(json(&out)["error"]["code"], "error");
+}

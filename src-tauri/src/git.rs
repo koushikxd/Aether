@@ -161,6 +161,27 @@ pub fn get_status(path: &Path) -> GitStatus {
     status
 }
 
+/// The paths `git status` reports as changed, untracked files one by one.
+/// Takes no optional lock, so it never gets in the way of the app's git work.
+pub fn changed_paths(path: &Path) -> Result<Vec<String>, String> {
+    let args = ["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all"];
+    let out = run(path, &args)?;
+    let text = String::from_utf8_lossy(&out);
+    let mut entries = text.split('\0').filter(|e| !e.is_empty());
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next() {
+        let (Some(code), Some(changed)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        // A rename or copy is followed by the old path.
+        if code.contains(['R', 'C']) {
+            entries.next();
+        }
+        paths.push(changed.to_string());
+    }
+    Ok(paths)
+}
+
 /// Stage all changes, run `after_stage`, and commit
 pub fn commit_all(
     path: &Path,
