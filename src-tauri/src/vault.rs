@@ -777,6 +777,30 @@ pub fn before_commit(
     Ok(files)
 }
 
+/// The app's commit: blobs brought up to date, then everything staged but
+/// the private plaintext, then committed.
+pub fn commit(
+    root: &Path,
+    ignored: &[String],
+    store: &dyn KeyStore,
+    message: &str,
+) -> git::GitResult {
+    match before_commit(root, ignored, store) {
+        Ok(private) => git::commit_all(root, message, || untrack(root, &private)),
+        Err(error) => failed(error),
+    }
+}
+
+/// The private page ids and file paths this device knows, to keep them out
+/// of messages for agents.
+pub fn private_names(root: &Path, ignored: &[String]) -> Result<BTreeSet<String>, String> {
+    let local = load(root)?;
+    let mut names = private_set(root, &local, ignored).files(root);
+    names.extend(local.files.into_keys());
+    names.extend(local.marks);
+    Ok(names)
+}
+
 /// Encrypts the private `files` that changed into their blobs, deletes the
 /// blobs of files no longer private, and writes the root blobs of new marks.
 /// Returns the paths no longer private, whose cache entries the caller drops.

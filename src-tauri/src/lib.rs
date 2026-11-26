@@ -18,6 +18,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+pub mod agent_git;
 mod export;
 mod git;
 mod merge;
@@ -2645,18 +2646,7 @@ async fn git_commit(message: String, state: State<'_, AppState>) -> Result<git::
     let store = state.key_store.clone();
     match folder {
         Some(path) => tauri::async_runtime::spawn_blocking(move || {
-            let root = PathBuf::from(path);
-            let private = match vault::before_commit(&root, &ignored, store.as_ref()) {
-                Ok(files) => files,
-                Err(error) => {
-                    return git::GitResult {
-                        success: false,
-                        message: None,
-                        error: Some(error),
-                    }
-                }
-            };
-            git::commit_all(&root, &message, || vault::untrack(&root, &private))
+            vault::commit(&PathBuf::from(path), &ignored, store.as_ref(), &message)
         })
         .await
         .map_err(|e| e.to_string()),
