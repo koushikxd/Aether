@@ -3,6 +3,7 @@ import { NodeViewWrapper, NodeViewContent } from "@tiptap/react";
 import type { ReactNodeViewProps } from "@tiptap/react";
 import { SUPPORTED_LANGUAGES } from "./lowlight";
 import { MermaidRenderer } from "./MermaidRenderer";
+import { SvgRenderer } from "./SvgRenderer";
 import { ChevronDownIcon, PencilIcon, EyeIcon } from "../icons";
 import { CodeCopyButton } from "../ui";
 
@@ -11,7 +12,7 @@ const btnClass =
 
 export function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
   const language: string = node.attrs.language || "";
-  const isMermaid = language === "mermaid";
+  const hasPreview = language === "mermaid" || language === "svg";
   const [showSource, setShowSource] = useState(!node.textContent.trim());
   const codeContent = node.textContent;
 
@@ -25,7 +26,7 @@ export function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
   const toolbar = (
     <div className="code-block-language-selector" contentEditable={false}>
       <CodeCopyButton text={codeContent} className={btnClass} />
-      {isMermaid && (
+      {hasPreview && (
         <button
           contentEditable={false}
           onClick={() => setShowSource(!showSource)}
@@ -62,7 +63,7 @@ export function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
     </div>
   );
 
-  if (isMermaid && !showSource) {
+  if (hasPreview && !showSource) {
     return (
       <NodeViewWrapper className="code-block-wrapper mermaid-wrapper" as="div">
         {toolbar}
@@ -70,7 +71,11 @@ export function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
           contentEditable={false}
           className="mermaid-preview rounded-lg bg-bg-muted p-4 my-1"
         >
-          <MermaidRenderer code={codeContent} />
+          {language === "svg" ? (
+            <SvgRenderer code={codeContent} />
+          ) : (
+            <MermaidRenderer code={codeContent} />
+          )}
         </div>
         {/* Hidden but present for TipTap content tracking */}
         <div

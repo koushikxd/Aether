@@ -85,4 +85,5 @@ export const SUPPORTED_LANGUAGES = [
   { value: "diff", label: "Diff" },
   { value: "dockerfile", label: "Dockerfile" },
   { value: "mermaid", label: "Mermaid" },
+  { value: "svg", label: "SVG" },
 ];

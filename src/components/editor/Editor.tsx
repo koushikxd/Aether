@@ -1065,7 +1065,15 @@ export function Editor({
       }),
       CodeBlockLowlight.extend({
         addNodeView() {
-          return ReactNodeViewRenderer(CodeBlockView);
+          return ReactNodeViewRenderer(CodeBlockView, {
+            // ProseMirror reuses node views across setContent. Refusing reuse
+            // while a note loads makes Preview/Edit start from the new content.
+            update: ({ oldNode, newNode, updateProps }) => {
+              if (isLoadingRef.current) return false;
+              if (oldNode !== newNode) updateProps();
+              return true;
+            },
+          });
         },
         // The default fence is always ```, which a ``` line in the code ends
         renderMarkdown(node, h) {

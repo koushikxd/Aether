@@ -51,6 +51,7 @@ Notes open in tabs shown in the editor header. A plain open replaces the active 
 - A handle next to each block opens a menu to turn it into another type, duplicate it (`Cmd+D` in the editor), or delete it.
 - Highlight and text color are stored as inline HTML (`<mark>`, `<span style="color: ...">`) so other markdown apps keep them.
 - Code blocks have syntax highlighting. Mermaid blocks render as diagrams. KaTeX renders math.
+- SVG code blocks show a preview with an Edit toggle.
 - Wikilinks: type `[[` to link to another note with autocomplete.
 - Images can be pasted, dropped in, and resized. Other files show as file cards.
 - When the open note changes on disk (the CLI or another app), the editor reloads it and keeps the cursor. If the editor has unsaved edits, it shows Refresh and Overwrite instead, and saves nothing until you pick one or open another note.
