@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// The app's bundle identifier, which names its data folder (`tauri.conf.json`).
+pub const APP_IDENTIFIER: &str = "com.aether.app";
+
 const WRONG_FOLDER: &str =
     "Aether has a different notes folder open: open this one in Aether first";
 /// The message of the app's own quick commit.
@@ -66,6 +69,51 @@ pub struct Reply {
     pub conflicts: Vec<Conflict>,
     #[serde(default)]
     pub private_conflicts: usize,
+}
+
+/// Where requests and replies wait: `{APP_DATA}/agent/`, the folder Tauri's
+/// `app_data_dir` gives for this identifier.
+pub fn mailbox() -> Result<PathBuf, String> {
+    dirs::data_dir()
+        .map(|dir| dir.join(APP_IDENTIFIER).join("agent"))
+        .ok_or_else(|| "could not find the app data folder".to_string())
+}
+
+pub fn request_file(mailbox: &Path, id: &str) -> PathBuf {
+    mailbox.join("requests").join(format!("{id}.json"))
+}
+
+pub fn reply_file(mailbox: &Path, id: &str) -> PathBuf {
+    mailbox.join("responses").join(format!("{id}.json"))
+}
+
+/// A random request id.
+pub fn new_id() -> String {
+    rand::random::<[u8; 16]>()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Whether `id` could come from `new_id`, so it names no other file.
+pub fn is_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Writes `value` as JSON under a temporary name, then renames it into
+/// place, so a reader never sees half a file. The folders it creates are
+/// readable by this user only on Unix.
+pub fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let dir = path.parent().expect("a mailbox file has a folder");
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir).map_err(|e| e.to_string())?;
+    let text = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, text).map_err(|e| e.to_string())?;
+    std::fs::rename(temp, path).map_err(|e| e.to_string())
 }
 
 impl Reply {
