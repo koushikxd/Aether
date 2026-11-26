@@ -2533,6 +2533,30 @@ async fn with_git<T: Send + 'static>(
     .map_err(|e| e.to_string())
 }
 
+/// Takes request `id` from the mailbox, runs it, and writes the reply. The
+/// frontend then refreshes its git state, and a hand-off brings the window
+/// forward with the merge editor.
+fn answer_agent_request(app: &AppHandle, id: &str) {
+    let mailbox = match agent_git::mailbox() {
+        Ok(mailbox) => mailbox,
+        Err(e) => return eprintln!("Agent request {id}: {e}"),
+    };
+    let reply = match agent_git::take_request(&mailbox, id) {
+        Ok(request) => run_agent_request(&app.state::<AppState>(), &request),
+        Err(e) => agent_git::Reply::error(e),
+    };
+    if let Err(e) = agent_git::write_json(&agent_git::reply_file(&mailbox, id), &reply) {
+        eprintln!("Agent request {id}: could not reply: {e}");
+    }
+    let _ = app.emit("git-state-changed", ());
+    if reply.outcome == agent_git::Outcome::HandedOff {
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.show();
+            let _ = main_window.set_focus();
+        }
+    }
+}
+
 /// Runs `f` with the notes folder, ignored folders and key store, off the async runtime.
 async fn with_vault<T: Send + 'static>(
     state: &AppState,
@@ -3615,6 +3639,11 @@ fn open_file_preview(app: AppHandle, path: String) -> Result<(), String> {
 // Handle CLI arguments: open .md files in preview mode.
 // Returns true if a standalone preview window was created (file outside notes folder).
 fn handle_cli_args(app: &AppHandle, args: &[String], cwd: &str) -> bool {
+    if let Some(id) = agent_git::request_id(args) {
+        let (app, id) = (app.clone(), id.to_string());
+        tauri::async_runtime::spawn_blocking(move || answer_agent_request(&app, &id));
+        return false;
+    }
     let mut opened_file = false;
     let mut opened_preview = false;
 
@@ -3711,6 +3740,13 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Requests and replies no CLI is waiting for anymore
+            if let Ok(mailbox) = agent_git::mailbox() {
+                std::thread::spawn(move || {
+                    agent_git::prune(&mailbox, std::time::Duration::from_secs(3600))
+                });
+            }
+
             #[cfg(windows)]
             std::thread::spawn(|| {
                 if let Err(e) = install::refresh_cli() {

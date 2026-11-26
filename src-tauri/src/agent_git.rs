@@ -116,6 +116,39 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     std::fs::rename(temp, path).map_err(|e| e.to_string())
 }
 
+/// The id after `--agent-request` in the app's arguments.
+pub fn request_id(args: &[String]) -> Option<&str> {
+    let at = args.iter().position(|a| a == "--agent-request")?;
+    args.get(at + 1).map(String::as_str).filter(|id| is_id(id))
+}
+
+/// Reads request `id` and deletes it, so it runs once.
+pub fn take_request(mailbox: &Path, id: &str) -> Result<Request, String> {
+    let file = request_file(mailbox, id);
+    let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+    std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+    serde_json::from_str(&text).map_err(|e| format!("Aether could not read the request: {e}"))
+}
+
+/// Deletes requests and replies older than `max_age`, left by a CLI that
+/// gave up or an app that quit.
+pub fn prune(mailbox: &Path, max_age: std::time::Duration) {
+    for dir in ["requests", "responses"] {
+        let Ok(entries) = std::fs::read_dir(mailbox.join(dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|time| time.elapsed().is_ok_and(|age| age > max_age));
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 impl Reply {
     fn new(outcome: Outcome, message: impl Into<String>) -> Self {
         Reply {
@@ -126,7 +159,7 @@ impl Reply {
         }
     }
 
-    fn error(message: impl Into<String>) -> Self {
+    pub fn error(message: impl Into<String>) -> Self {
         Reply::new(Outcome::Error, message)
     }
 }
