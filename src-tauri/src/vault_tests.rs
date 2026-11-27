@@ -1667,7 +1667,10 @@ fn public_conflicts_are_listed_and_continue_waits_for_the_markers_to_go() {
     let still_merging = git::merge_in_progress(c.b.root());
     c.b.write("Home.md", "# Home\n\n```\n<<<<<<< HEAD\nhello\n```\n");
     let fenced = agent(&c.b, Action::SyncContinue, None);
-    c.b.write("Home.md", "# Home\n\n<<<<<<<<<<<< HEAD\nhello\n>>>>>>>>>>>> theirs\n");
+    c.b.write(
+        "Home.md",
+        "# Home\n\n<<<<<<<<<<<< HEAD\nhello\n>>>>>>>>>>>> theirs\n",
+    );
     let wide = agent(&c.b, Action::SyncContinue, None);
     c.b.write("Home.md", "# Home\n\nhello from both\n");
     let finished = agent(&c.b, Action::SyncContinue, None);
@@ -1683,7 +1686,11 @@ fn public_conflicts_are_listed_and_continue_waits_for_the_markers_to_go() {
     assert!(marked.contains("<<<<<<<"), "{marked}");
     assert_eq!(early.outcome, Outcome::Conflicts, "{early:?}");
     assert_eq!(conflict_pages(&early), ["Home"]);
-    assert_eq!(mid_merge_commit.outcome, Outcome::Error, "{mid_merge_commit:?}");
+    assert_eq!(
+        mid_merge_commit.outcome,
+        Outcome::Error,
+        "{mid_merge_commit:?}"
+    );
     assert!(
         mid_merge_commit.message.contains("sync --continue"),
         "{}",
@@ -1798,7 +1805,11 @@ fn a_reply_naming_a_private_page_the_way_git_quotes_it_is_withheld() {
 
     let redacted = agent_git::redact(reply, &[Ok(names)]);
 
-    assert!(!redacted.message.contains("nk/Link.md"), "{}", redacted.message);
+    assert!(
+        !redacted.message.contains("nk/Link.md"),
+        "{}",
+        redacted.message
+    );
 }
 
 #[test]
