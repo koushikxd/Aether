@@ -383,6 +383,25 @@ fn has_markers(root: &Path, path: &str) -> bool {
     })
 }
 
+/// Whether a part of `path` is on disk only under a spelling that differs in
+/// case, which `Path::exists` does not notice on a case-insensitive disk.
+fn renamed_in_case(root: &Path, path: &str) -> bool {
+    let mut dir = root.to_path_buf();
+    path.split('/').any(|name| {
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        dir.push(name);
+        !names.iter().any(|n| n == name)
+            && names
+                .iter()
+                .any(|n| n.to_lowercase() == name.to_lowercase())
+    })
+}
+
 fn continue_sync(root: &Path, ignored: &[String], store: &dyn KeyStore) -> Reply {
     if !git::merge_in_progress(root) {
         return Reply::error("There is no sync to continue");
@@ -407,14 +426,16 @@ fn continue_sync(root: &Path, ignored: &[String], store: &dyn KeyStore) -> Reply
         return conflict_reply(root, ignored, &unresolved, private);
     }
     // A conflicted page away from its path was renamed or moved, so staging
-    // would delete it and leave the resolution out of the merge.
+    // would delete it and leave the resolution out of the merge. A rename
+    // that only changes case would be lost the same way on a case-insensitive disk.
     let away: Vec<&str> = public
         .iter()
         .filter(|f| !f.ours_deleted && !f.theirs_deleted)
         .map(|f| f.path.as_str())
         .filter(|path| {
             let file = crate::dir_from_id(root, path);
-            crate::id_from_abs_path(root, &file, ignored).is_some() && !file.exists()
+            crate::id_from_abs_path(root, &file, ignored).is_some()
+                && (!file.exists() || renamed_in_case(root, path))
         })
         .collect();
     if !away.is_empty() {

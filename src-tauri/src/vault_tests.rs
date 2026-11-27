@@ -1762,6 +1762,36 @@ fn continue_refuses_while_a_conflicted_page_is_away_from_its_path() {
 }
 
 #[test]
+fn continue_refuses_while_a_conflicted_page_is_renamed_only_in_case() {
+    let c = public_conflict();
+    assert_eq!(agent(&c.b, Action::Sync, None).outcome, Outcome::Conflicts);
+    c.b.write("Home.md", "# Home\n\nhello from both\n");
+    let (spelled, lower, temp) = (
+        c.b.root().join("Home.md"),
+        c.b.root().join("home.md"),
+        c.b.root().join("temp.md"),
+    );
+    std::fs::rename(&spelled, &temp).expect("rename");
+    std::fs::rename(&temp, &lower).expect("rename");
+
+    let renamed = agent(&c.b, Action::SyncContinue, None);
+    let still_merging = git::merge_in_progress(c.b.root());
+    std::fs::rename(&lower, &temp).expect("rename");
+    std::fs::rename(&temp, &spelled).expect("rename");
+    let finished = agent(&c.b, Action::SyncContinue, None);
+
+    artifact(
+        "continue_refuses_while_a_conflicted_page_is_renamed_only_in_case",
+        &[("b", &c.b)],
+    );
+    assert_eq!(renamed.outcome, Outcome::Error, "{renamed:?}");
+    assert!(renamed.message.contains("Home.md"), "{}", renamed.message);
+    assert!(still_merging);
+    assert_ok(&finished);
+    assert_eq!(git(c.b.root(), &["ls-files", "Home.md"]).trim(), "Home.md");
+}
+
+#[test]
 fn a_reply_naming_a_private_page_the_way_git_quotes_it_is_withheld() {
     let names = std::collections::BTreeSet::from(["Finance/B\u{e4}nk/Link.md".to_string()]);
     let reply = Reply::error("refused:\n  \"Finance/B\\303\\244nk/Link.md\"");
