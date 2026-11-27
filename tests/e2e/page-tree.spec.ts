@@ -191,8 +191,8 @@ test("the + on a row creates a sub-page of that page, expanding it", async ({
   await app.row("Page").hover();
   await app.row("Page").locator("[data-new-sub-page]").click();
 
-  await expect.poll(() => app.file("Page/Untitled.md")).toBe("# Untitled\n\n");
-  await expect(app.editor.locator("h1")).toHaveText("Untitled");
+  await expect.poll(() => app.file("Page/Untitled.md")).toBe("");
+  await expect(app.editor.locator("h1")).toHaveText("");
   await expect(app.row("Page")).toHaveAttribute("aria-expanded", "true");
   await expect(app.row("Untitled")).toBeVisible();
   expect(await left(app, "Untitled")).toBeGreaterThan(await left(app, "Page"));
@@ -210,13 +210,13 @@ test("Cmd+N and the header + create a top-level page while a sub-page is open", 
   await app.row("Child").click();
   await expect(app.editor).toContainText("Child body.");
   await app.page.keyboard.press("ControlOrMeta+n");
-  await expect.poll(() => app.file("Untitled.md")).toBe("# Untitled\n\n");
-  await expect(app.editor.locator("h1")).toHaveText("Untitled");
+  await expect.poll(() => app.file("Untitled.md")).toBe("");
+  await expect(app.editor.locator("h1")).toHaveText("");
 
   await app.row("Child").click();
   await expect(app.editor).toContainText("Child body.");
   await app.sidebar.getByRole("button", { name: /^New Note/ }).click();
-  await expect.poll(() => app.file("Untitled-1.md")).toBe("# Untitled\n\n");
+  await expect.poll(() => app.file("Untitled-1.md")).toBe("");
 
   const notePaths = Object.keys(await app.files()).filter((p) =>
     p.endsWith(".md"),

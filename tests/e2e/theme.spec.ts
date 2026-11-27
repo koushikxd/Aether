@@ -30,3 +30,16 @@ for (const scheme of ["light", "dark"] as const) {
     await app.screenshot(`theme-${scheme}`);
   });
 }
+
+test("the page has no drag grips at its edges", async ({ app }) => {
+  await app.page.setViewportSize({ width: 1600, height: 900 });
+  await app.seed({ "Welcome.md": "# Welcome\n\nReadable text.\n" });
+  await app.sidebar.getByText("Welcome").click();
+  await expect(app.editor).toContainText("Readable text.");
+
+  await expect(
+    app.page.getByRole("separator", { name: /resize editor width/i }),
+  ).toHaveCount(0);
+
+  await app.screenshot("page-no-width-grips");
+});

@@ -350,6 +350,16 @@ html.dark {
   margin-bottom: 0.35em;
 }
 
+/* The empty title's "Untitled", drawn without being text in the note */
+.prose h1.title-empty::before {
+  content: attr(data-title-placeholder);
+  color: var(--color-text-muted);
+  opacity: 0.5;
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
 .prose h2 {
   font-family: var(--editor-font-family);
   font-size: var(--editor-h2-size);

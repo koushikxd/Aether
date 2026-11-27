@@ -16,15 +16,16 @@ import { Footer } from "./Footer";
 import { SelectionBar } from "./SelectionBar";
 import { outermostIds } from "../../lib/folderTree";
 import { Button, IconButton } from "../ui";
-import { PlusIcon, NoteIcon, LockIcon } from "../icons";
-import { mod, isMac, isWindows } from "../../lib/platform";
+import { PlusIcon, NoteIcon, LockIcon, SearchIcon } from "../icons";
+import { mod, shift, shortcut } from "../../lib/platform";
 
 interface SidebarProps {
   onOpenSettings?: () => void;
+  onOpenSearch?: () => void;
 }
 
-export function Sidebar({ onOpenSettings }: SidebarProps) {
-  const { createNote, notes, moveNote } = useNotes();
+export function Sidebar({ onOpenSettings, onOpenSearch }: SidebarProps) {
+  const { createNote, moveNote } = useNotes();
   const { status: vault, enterKey } = useVault();
   const [dragLabel, setDragLabel] = useState<string | null>(null);
   const [dragCount, setDragCount] = useState(1);
@@ -136,28 +137,29 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       onDragCancel={() => setDragLabel(null)}
     >
       <div className="relative w-full h-full bg-bg-secondary border-r border-border flex flex-col select-none">
-        {/* Drag region */}
-        {!isWindows && (
-          <div className="h-11 shrink-0" data-tauri-drag-region></div>
-        )}
+        {/* Title bar row: the window controls sit on its left */}
         <div
-          className={`flex items-center justify-between pl-4 pr-3 pb-2 border-b border-border shrink-0${isWindows ? " pt-2" : ""}`}
+          className="h-11 shrink-0 flex items-center justify-end gap-px px-2"
+          data-tauri-drag-region
         >
-          <div className="flex items-center gap-1">
-            <div className="font-medium text-base">Notes</div>
-            <div className="text-text-muted font-medium text-2xs min-w-4.75 h-4.75 flex items-center justify-center px-1 bg-bg-muted rounded-sm mt-0.5 pt-px">
-              {notes.length}
-            </div>
-          </div>
-          <div className="flex items-center gap-px">
+          {onOpenSearch && (
             <IconButton
               variant="ghost"
-              onClick={() => createNote()}
-              title={`New Note (${mod}${isMac ? "" : "+"}N)`}
+              onClick={onOpenSearch}
+              title={`Search (${shortcut(mod, shift, "F")})`}
+              className="titlebar-no-drag"
             >
-              <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
+              <SearchIcon className="w-4.5 h-4.5 stroke-[1.5]" />
             </IconButton>
-          </div>
+          )}
+          <IconButton
+            variant="ghost"
+            onClick={() => createNote()}
+            title={`New Note (${shortcut(mod, "N")})`}
+            className="titlebar-no-drag"
+          >
+            <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
+          </IconButton>
         </div>
         {vault?.hasVault && !vault.unlocked && vault.lockedCount > 0 && (
           <output className="flex items-center gap-2 mx-1.5 mt-1.5 pl-2.5 pr-1.5 py-1.5 rounded-md bg-bg-muted text-sm text-text shrink-0">

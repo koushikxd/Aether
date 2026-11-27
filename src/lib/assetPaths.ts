@@ -3,6 +3,7 @@
 // from convertFileSrc. Only files inside the notes folder are converted.
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Editor, JSONContent } from "@tiptap/core";
+import { withoutEmptyTitle } from "../components/editor/Title";
 
 export interface NoteLocation {
   notesFolder: string;
@@ -226,7 +227,7 @@ export function editorMarkdown(
   // Clean up the nbsp entities TipTap writes for empty paragraphs (a line or
   // table cell of its own), keeping hand-written ones such as in <summary>
   return manager
-    .serialize(withRelativeSrcs(doc, location))
+    .serialize(withRelativeSrcs(withoutEmptyTitle(doc), location))
     .replace(/(?:&nbsp;|&#160;)(?=[ \t]*(?:\||$))/gm, " ");
 }
 

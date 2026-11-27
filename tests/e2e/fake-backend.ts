@@ -518,7 +518,8 @@ function saveNote(args: Args): Note {
   return note(newId);
 }
 
-// Mirrors create_note with the default "Untitled" name template.
+// Mirrors create_note with the default "Untitled" name template, which leaves
+// the title empty for the editor to show as a placeholder.
 function createNote(args: Args): Note {
   const folder = optStr(args, "targetFolder");
   const hidden = folder?.split("/").find((dir) => HIDDEN_DIRS.has(dir));
@@ -529,7 +530,7 @@ function createNote(args: Args): Note {
   const base = folder ? `${folder}/Untitled` : "Untitled";
   let id = base;
   for (let n = 1; `${id}.md` in files; n += 1) id = `${base}-${n}`;
-  writeFile(`${id}.md`, "# Untitled\n\n");
+  writeFile(`${id}.md`, "");
   return note(id);
 }
 

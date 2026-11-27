@@ -25,13 +25,4 @@ for (const scheme of ["light", "dark"] as const) {
     );
     await app.screenshot(`welcome-${scheme}`);
   });
-
-  test(`empty editor shows a notepad on books (${scheme})`, async ({ app }) => {
-    await app.page.emulateMedia({ colorScheme: scheme });
-    await app.seed({ "Welcome.md": "# Welcome\n" });
-    await expectSvgMask(
-      app.page.getByRole("img", { name: "Notepad on a stack of books" }),
-    );
-    await app.screenshot(`empty-editor-${scheme}`);
-  });
 }

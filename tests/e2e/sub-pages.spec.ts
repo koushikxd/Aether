@@ -64,8 +64,8 @@ test("New sub-page in the context menu creates and opens a nested note", async (
   await app.row("Page").click({ button: "right" });
   await app.page.getByRole("menuitem", { name: "New sub-page" }).click();
 
-  await expect.poll(() => app.file("Page/Untitled.md")).toBe("# Untitled\n\n");
-  await expect(app.editor.locator("h1")).toHaveText("Untitled");
+  await expect.poll(() => app.file("Page/Untitled.md")).toBe("");
+  await expect(app.editor.locator("h1")).toHaveText("");
   await expect(app.row("Page")).toHaveCount(1);
   await expect(app.row("Page")).toHaveAttribute("aria-expanded", "true");
   expect(await left(app, "Untitled")).toBeGreaterThan(await left(app, "Page"));
@@ -102,9 +102,7 @@ test("the Sub-page slash command creates a sub-page and links to it", async ({
   await app.page.keyboard.type("/sub-page");
   await app.page.keyboard.press("Enter");
 
-  await expect
-    .poll(() => app.file("a/My Page/Untitled.md"))
-    .toBe("# Untitled\n\n");
+  await expect.poll(() => app.file("a/My Page/Untitled.md")).toBe("");
   await expect
     .poll(() => app.savedMarkdown("a/My Page"))
     .toBe("# My Page\n\nIntro\n\n[Untitled](My%20Page/Untitled.md)");
@@ -112,10 +110,10 @@ test("the Sub-page slash command creates a sub-page and links to it", async ({
   await expect(app.row("Untitled")).toBeVisible();
 
   // The sub-page opens in a new tab; the link in the page leads to that tab
-  await expect(app.editor.locator("h1")).toHaveText("Untitled");
+  await expect(app.editor.locator("h1")).toHaveText("");
   await app.row("My Page").click();
   await app.editor.getByRole("link", { name: "Untitled" }).click();
-  await expect(app.editor.locator("h1")).toHaveText("Untitled");
+  await expect(app.editor.locator("h1")).toHaveText("");
   await app.screenshot("sub-page-from-slash-command");
 });
 

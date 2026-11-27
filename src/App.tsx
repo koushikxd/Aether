@@ -5,7 +5,7 @@ import { ThemeProvider, useTheme } from "./context/ThemeContext";
 import { listen } from "@tauri-apps/api/event";
 import { GitProvider } from "./context/GitContext";
 import { VaultProvider } from "./context/VaultContext";
-import { TooltipProvider, Toaster } from "./components/ui";
+import { IconButton, TooltipProvider, Toaster } from "./components/ui";
 import { Sidebar } from "./components/layout/Sidebar";
 import { SidebarResizeHandle } from "./components/layout/SidebarResizeHandle";
 import { SIDEBAR_DEFAULT_PX } from "./lib/sidebar";
@@ -23,6 +23,7 @@ import {
   CodexIcon,
   OpenCodeIcon,
   OllamaIcon,
+  PanelLeftIcon,
 } from "./components/icons";
 import { AiEditModal } from "./components/ai/AiEditModal";
 import { AiResponseToast } from "./components/ai/AiResponseToast";
@@ -36,7 +37,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as aiService from "./services/ai";
 import type { AiProvider } from "./services/ai";
-import { isMac, isWindows } from "./lib/platform";
+import { isMac, isWindows, mod as modLabel, shortcut } from "./lib/platform";
 import { useNoteNavigation } from "./lib/noteNavigation";
 import { TabsProvider, useTabs } from "./context/TabsContext";
 
@@ -91,6 +92,10 @@ function AppContent() {
     setPaletteKey((k) => k + 1);
     setPaletteOpen(true);
   }, []);
+  const openSearch = useCallback(
+    () => openPaletteIn("search"),
+    [openPaletteIn],
+  );
   const [view, setView] = useState<ViewState>("notes");
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [aiModalOpen, setAiModalOpen] = useState(false);
@@ -592,11 +597,24 @@ function AppContent() {
               }}
               className={`relative transition-all duration-500 ease-out overflow-hidden ${!sidebarVisible || focusMode ? "opacity-0 -translate-x-4 pointer-events-none" : "opacity-100 translate-x-0"}`}
             >
-              <Sidebar onOpenSettings={toggleSettings} />
+              <Sidebar
+                onOpenSettings={toggleSettings}
+                onOpenSearch={openSearch}
+              />
               {sidebarVisible && !focusMode && <SidebarResizeHandle />}
             </div>
+            {!focusMode && (
+              // Pinned so it stays beside the window dots whether the sidebar is open or not
+              <IconButton
+                onClick={toggleSidebar}
+                title={`${sidebarVisible ? "Hide" : "Show"} sidebar (${shortcut(modLabel, "\\")})`}
+                className={`titlebar-no-drag fixed top-2 z-30 ${isWindows ? "left-2" : "left-19"}`}
+              >
+                <PanelLeftIcon className="w-4.5 h-4.5 stroke-[1.5]" />
+              </IconButton>
+            )}
             <Editor
-              onToggleSidebar={toggleSidebar}
+              onOpenSearch={openSearch}
               sidebarVisible={sidebarVisible}
               focusMode={focusMode}
               onEditorReady={(editor) => {
@@ -610,7 +628,7 @@ function AppContent() {
       {/* Shared backdrop for command palette and AI modal */}
       {(paletteOpen || aiModalOpen) && (
         <div
-          className="fixed inset-0 bg-text/50 backdrop-blur-sm z-40 animate-fade-in"
+          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 animate-fade-in"
           aria-hidden="true"
           onClick={() => {
             if (paletteOpen) handleClosePalette();

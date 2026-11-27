@@ -64,8 +64,10 @@ import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { useOptionalNotes } from "../../context/NotesContext";
 import { useOptionalTabs } from "../../context/TabsContext";
 import { TabStrip } from "./TabStrip";
+import { Home } from "../layout/Home";
 import { useTheme } from "../../context/ThemeContext";
 import { Frontmatter } from "./Frontmatter";
+import { Title } from "./Title";
 import { BlockMathEditor } from "./BlockMathEditor";
 import { LinkEditor } from "./LinkEditor";
 import { SearchToolbar } from "./SearchToolbar";
@@ -81,7 +83,6 @@ import { ColorTextStyle, MarkHighlight } from "./marks";
 import { Color } from "@tiptap/extension-text-style";
 import { Wikilink } from "./Wikilink";
 import { getWikilinkStorage, WikilinkSuggestion } from "./WikilinkSuggestion";
-import { EditorWidthHandles } from "./EditorWidthHandle";
 import {
   AetherBlockMath,
   AetherInlineMath,
@@ -104,7 +105,7 @@ import {
   withDisplaySrcs,
   type NoteLocation,
 } from "../../lib/assetPaths";
-import { Button, IconButton, Tooltip } from "../ui";
+import { IconButton, Tooltip } from "../ui";
 import * as notesService from "../../services/notes";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
 import {
@@ -122,7 +123,6 @@ import {
   CopyIcon,
   DownloadIcon,
   ShareIcon,
-  PanelLeftIcon,
   RefreshCwIcon,
   PinIcon,
   SearchIcon,
@@ -226,13 +226,13 @@ export interface PreviewModeData {
 }
 
 interface EditorProps {
-  onToggleSidebar?: () => void;
   sidebarVisible?: boolean;
   focusMode?: boolean;
   previewMode?: PreviewModeData;
   onEditorReady?: (editor: TiptapEditor | null) => void;
   onSaveToFolder?: () => void;
   saveToFolderDisabled?: boolean;
+  onOpenSearch?: () => void;
 }
 
 /**
@@ -289,13 +289,13 @@ function blockIndexToPos(
 }
 
 export function Editor({
-  onToggleSidebar,
   sidebarVisible,
   focusMode,
   onEditorReady,
   previewMode,
   onSaveToFolder,
   saveToFolderDisabled,
+  onOpenSearch,
 }: EditorProps) {
   // Always call the hook (rules of hooks), but it returns null outside NotesProvider
   const notesCtx = useOptionalNotes();
@@ -335,7 +335,6 @@ export function Editor({
     : notesCtx!.saveNote;
   const setPendingSaveFlush = notesCtx?.setPendingSaveFlush;
 
-  const createNote = notesCtx?.createNote;
   const consumePendingNewNote = notesCtx?.consumePendingNewNote;
   const hasExternalChanges = previewMode
     ? previewMode.hasExternalChanges
@@ -1083,6 +1082,7 @@ export function Editor({
         lowlight,
         defaultLanguage: null,
       }),
+      Title,
       Placeholder.configure({
         placeholder: "Start writing...",
       }),
@@ -2320,88 +2320,25 @@ export function Editor({
       );
     }
 
-    // Folder mode: show empty state with "New Note" button
-    return (
-      <div className="flex-1 flex flex-col bg-bg">
-        {/* Drag region */}
-        {!isWindows && (
-          <div
-            className="h-10 shrink-0 flex items-end px-4 pb-1"
-            data-tauri-drag-region
-          ></div>
-        )}
-        <div className="flex-1 flex items-center justify-center pb-8">
-          <div className="text-center text-text-muted select-none">
-            <div
-              // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role -- tinted via CSS mask with backgroundColor, which an <img> cannot render
-              role="img"
-              aria-label="Notepad on a stack of books"
-              className="w-42 aspect-square mx-auto mb-1"
-              style={{
-                backgroundColor: "var(--color-text)",
-                WebkitMaskImage: "url(/notepad-on-books.svg)",
-                WebkitMaskSize: "contain",
-                WebkitMaskRepeat: "no-repeat",
-                WebkitMaskPosition: "center",
-                maskImage: "url(/notepad-on-books.svg)",
-                maskSize: "contain",
-                maskRepeat: "no-repeat",
-                maskPosition: "center",
-              }}
-            />
-            <h1 className="text-2xl text-text font-serif mb-1 tracking-[-0.01em] ">
-              What's on your mind?
-            </h1>
-            <p className="text-sm">
-              Pick up where you left off, or start something new
-            </p>
-            {createNote && (
-              <Button
-                onClick={createNote}
-                variant="secondary"
-                size="md"
-                className="mt-4"
-              >
-                New Note{" "}
-                <span className="text-text-muted ml-1">
-                  {mod}
-                  {isMac ? "" : "+"}N
-                </span>
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
-    );
+    return <Home onOpenSearch={onOpenSearch} />;
   }
 
   return (
     <div className="flex-1 flex flex-col bg-bg overflow-hidden">
-      {/* Drag region with sidebar toggle, date and save status */}
+      {/* Drag region with date and save status */}
       <div
         className={cn(
           "h-11 shrink-0 flex items-center justify-between px-3",
-          !isSidebarActive && !isWindows && "pl-22",
+          // Clears the window dots and the sidebar toggle App pins beside them
+          !isSidebarActive && (isWindows ? "pl-11" : "pl-28"),
         )}
         data-tauri-drag-region
       >
         <div
           className={`flex-1 h-full flex items-center gap-1 min-w-0 mr-2 transition-opacity duration-400 ${needsSidebarDelay ? "delay-200" : ""} ${focusMode ? "opacity-0 pointer-events-none" : "opacity-100"}`}
           data-tauri-drag-region
+          data-editor-header-start
         >
-          {onToggleSidebar && (
-            <IconButton
-              onClick={onToggleSidebar}
-              title={
-                isSidebarActive
-                  ? `Hide sidebar (${mod}${isMac ? "" : "+"}\\)`
-                  : `Show sidebar (${mod}${isMac ? "" : "+"}\\)`
-              }
-              className="titlebar-no-drag shrink-0"
-            >
-              <PanelLeftIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-            </IconButton>
-          )}
           {tabs ? (
             <TabStrip />
           ) : (
@@ -2620,11 +2557,7 @@ export function Editor({
         </div>
       </div>
 
-      {/* Editor content area with resize handles overlay */}
       <div data-editor-content-area className="flex-1 relative overflow-hidden">
-        {!focusMode && !sourceMode && (
-          <EditorWidthHandles containerRef={scrollContainerRef} />
-        )}
         <div
           data-editor-scroll
           ref={scrollContainerRef}

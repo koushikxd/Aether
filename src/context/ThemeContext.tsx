@@ -117,7 +117,6 @@ interface ThemeContextType {
   ) => void;
   customEditorWidthPx: number;
   setCustomEditorWidthPx: (px: number) => void;
-  setEditorMaxWidthLive: (value: string) => void;
   sidebarWidthPx: number | null;
   setSidebarWidthPx: (px: number | null) => void;
   setSidebarWidthLive: (px: number) => void;
@@ -621,11 +620,6 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     }
   }, []);
 
-  // Live CSS variable update during drag (no persistence)
-  const setEditorMaxWidthLive = useCallback((value: string) => {
-    document.documentElement.style.setProperty("--editor-max-width", value);
-  }, []);
-
   /** Updates `--sidebar-width` CSS variable immediately during drag without writing to settings. */
   const setSidebarWidthLive = useCallback((px: number) => {
     document.documentElement.style.setProperty("--sidebar-width", `${px}px`);
@@ -655,7 +649,6 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
         setInterfaceZoom,
         customEditorWidthPx,
         setCustomEditorWidthPx,
-        setEditorMaxWidthLive,
         sidebarWidthPx,
         setSidebarWidthPx,
         setSidebarWidthLive,

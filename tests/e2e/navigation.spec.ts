@@ -130,8 +130,8 @@ test("Cmd+Shift+N creates and opens a sub-page of the open note", async ({
 
   await openFromSidebar(app, "Page");
   await app.page.keyboard.press("ControlOrMeta+Shift+n");
-  await expect.poll(() => app.file("Page/Untitled.md")).toBe("# Untitled\n\n");
-  await expect(app.editor.locator("h1")).toHaveText("Untitled");
+  await expect.poll(() => app.file("Page/Untitled.md")).toBe("");
+  await expect(app.editor.locator("h1")).toHaveText("");
   await expect(app.row("Page")).toHaveAttribute("aria-expanded", "true");
   const notePaths = Object.keys(await app.files()).filter((p) =>
     p.endsWith(".md"),
