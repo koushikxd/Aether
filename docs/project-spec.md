@@ -67,42 +67,17 @@ Notes open in tabs shown in the editor header. A plain open replaces the active 
 
 ## Copy, export, import
 
-- Per note (`Cmd+Shift+C`): copy as markdown, plain text, or HTML; print as PDF; export markdown; export a zip (the page, its sub-pages, and their assets); export self-contained HTML. When a sub-page is private, the zip export asks whether to include private pages (off by default). When the page itself is private, it shows a warning instead, and Export includes the page and its sub-pages unencrypted.
-- Settings, Export and Import: "Export Workspace" zips every note and asset. When the folder has private pages, a dialog asks whether to include them unencrypted (off by default).
-- "Import Zip" unpacks an exported zip into the notes folder.
-- "Import from Notion" takes the zip files of a Notion HTML export (with subpages and folders for subpages). Top-level Notion pages land at the root of the notes folder. Name clashes get a `-1`, `-2` suffix. After the import you can pick which imported pages to make private.
+Per note (`Cmd+Shift+C`): copy as markdown, plain text, or HTML, print as PDF, or export markdown, a zip of the page with its sub-pages, or self-contained HTML. Settings exports the whole workspace as a zip and imports a zip back. Private pages stay out of exports unless the user opts in. See [export-import.md](export-import.md).
+
+"Import from Notion" turns the zips of a Notion HTML export into pages with sub-pages and assets, then offers to make imported pages private. See [notion-import.md](notion-import.md).
 
 ## Git sync
 
-- Optional, under Settings, Version Control. Aether can run `git init`, add or change the `origin` remote, and push with upstream.
-- The footer shows the branch, uncommitted changes, and a sync button. The command menu has "Git: Quick Commit" and "Git: Sync (Pull and Push)".
-- Commit stages everything and commits. Sync pulls, then pushes when the local branch is ahead.
-- With a remote set, Aether fetches every 60 seconds to show incoming changes.
-
-## Merge editor
-
-When a pull conflicts, a "Resolve conflicts" dialog lists the conflicting notes, public and private.
-
-- For each conflict, keep "This device", "Other device", or "Both", and edit the result by hand.
-- Binary files and files deleted on one side can only keep one side.
-- Finishing commits the merge and pushes. "Cancel sync" aborts the merge and restores the state before the pull.
-- If the folder opens in the middle of a merge, the dialog opens again.
-- A sync from the CLI that stops on conflicts opens the dialog in the running app.
+Optional, under Settings, Version Control. The footer shows the branch, uncommitted changes, and a sync button. Commit stages everything; sync pulls with a merge, then pushes. Conflicts open a merge editor that handles public and private notes. See [git-sync.md](git-sync.md).
 
 ## Private pages
 
-Private pages let you sync a folder through git while keeping some pages unreadable to anyone without your key.
-
-- Right-click a page and choose "Make private". Its sub-pages, and assets used only by private pages, become private too. A lock icon marks private rows.
-- The first time, Aether asks you to generate a key. Store it somewhere safe: without it, private pages cannot be opened on another device or recovered.
-- On disk the page stays readable as normal markdown. Git never sees the plaintext. Each commit from Aether encrypts private files into `.aether/vault/`, and only those encrypted files are committed and pushed.
-- On another device, the pages show as locked ("Private pages locked") until you enter the key. Then they are decrypted into place, and stay in sync on every pull.
-- Settings, Private Pages: generate, show, or enter the key.
-- "Make public" asks for confirmation, because the page will be pushed unencrypted on the next commit. A sub-page of a private page cannot be made public on its own.
-- A commit is refused while a public page links to a private page, since the link would expose its path.
-- A sync is refused while private changes are uncommitted.
-- Pins of private pages are kept on the device, out of the committed settings file.
-- Aether installs git hooks in the notes folder that refuse a terminal commit holding a private file in plaintext. Commit from the app.
+Right-click a page and choose "Make private". The page stays readable on disk, but git only ever sees an encrypted copy, so it can sync through a shared remote. Other devices need the key to read it. See [private-pages.md](private-pages.md).
 
 ## AI editing
 
@@ -111,16 +86,7 @@ Edit the current note with a local CLI: Claude Code, OpenAI Codex, OpenCode, or 
 ## Preview mode and CLI
 
 - Opening a `.md` file from outside the notes folder (drag-and-drop or "Open With") shows it in a standalone preview window, which can save it into the notes folder.
-- Settings, Integrations, Install CLI Tool puts an `aether` command on PATH on macOS, Windows, and Linux. It works with the app closed. `aether --help` lists every command.
-  - `list`, `search`, `read`, and `check` find and read pages. `create`, `append`, `edit`, and `move` change them. There is no delete. `--json` prints one JSON object, errors included.
-  - The notes folder is `--folder`, else the nearest folder above the current directory that holds `.aether/`, else the folder open in the app.
-  - Private pages do not exist for the CLI. A command that touches one fails with `path unavailable` and names nothing.
-  - `read` prints a hash. `edit` needs it as `--if-match <hash>` and fails with exit code 3 if the page changed since. A new first heading renames the page and rewrites links, as in the app. Moves and renames keep pins.
-  - `status` shows the branch, ahead and behind, changed public pages by id, and private changes only as a count. It works with the app closed.
-  - `commit [-m <message>]` and `sync` hand the work to the app, starting it if needed, because only the app holds the vault key. The app answers only for the notes folder it has open. Replies never name a private page.
-  - `sync` that stops on conflicts exits with code 3 and lists the public conflicting files. Fix their markers, then `sync --continue` finishes the merge and pushes, or `sync --abort` cancels it. When private pages conflict too, `--continue` exits with code 4 and the app brings its merge editor forward for them.
-  - `aether .` or `aether open <folder>` opens a folder as the notes folder. `aether note.md` opens a note. `aether` alone starts the app.
-- Install Agent Skill writes a skill that teaches agents to use the CLI when you ask them to work with your notes, to `~/.claude/skills/aether/` (Claude Code) and `~/.agents/skills/aether/` (Codex and other agents). The button reads Update Agent Skill when an installed copy differs from this version of Aether.
+- Settings, Integrations, Install CLI Tool puts an `aether` command on PATH, and Install Agent Skill teaches AI agents to use it. The CLI reads and edits pages with the app closed, cannot see private pages, and hands commit and sync to the app. See [cli.md](cli.md).
 
 ## Settings
 
