@@ -294,7 +294,21 @@ fn create_note_in_a_page_creates_its_sub_page_folder() {
     notes.save_artifact("create_note_in_a_page_creates_its_sub_page_folder");
     assert_eq!(created.id, "a/Page/Untitled");
     assert_eq!(notes.tree(), ["a/Page.md", "a/Page/Untitled.md"]);
-    assert_eq!(notes.read("a/Page/Untitled.md"), "# Untitled\n\n");
+    assert_eq!(notes.read("a/Page/Untitled.md"), "");
+}
+
+#[test]
+fn create_note_writes_a_title_only_for_a_custom_name_template() {
+    let notes = TestNotes::new();
+    run(crate::create_note(None, notes.state())).expect("create_note");
+    notes.state().settings.write().expect("settings").default_note_name =
+        Some("Meeting".to_string());
+    let named = run(crate::create_note(None, notes.state())).expect("create_note");
+
+    notes.save_artifact("create_note_writes_a_title_only_for_a_custom_name_template");
+    assert_eq!(notes.read("Untitled.md"), "");
+    assert_eq!(named.id, "Meeting");
+    assert_eq!(notes.read("Meeting.md"), "# Meeting\n\n");
 }
 
 #[test]

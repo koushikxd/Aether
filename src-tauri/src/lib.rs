@@ -1485,7 +1485,12 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
     // Extract display title from filename
     let display_title = extract_title_from_id(&final_id);
 
-    let content = format!("# {}\n\n", display_title);
+    // "Untitled" is a placeholder, not a title: the editor shows it over an empty title
+    let content = if template == "Untitled" {
+        String::new()
+    } else {
+        format!("# {}\n\n", display_title)
+    };
     let file_path = abs_path_from_id(&folder_path, &final_id)?;
 
     // Create parent directories (for templates like {year}/{month}/{day})
