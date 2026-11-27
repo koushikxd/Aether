@@ -1,71 +1,51 @@
-# Aether - Development Guide
+# Aether
 
-## Project Overview
-
-Aether is a cross-platform markdown note-taking app for macOS, Windows, and Linux, built with Tauri v2 (Rust backend) + React/TypeScript/Tailwind (frontend) + TipTap (WYSIWYG editor) + Tantivy (full-text search).
-
-## Commands
-
-```bash
-pnpm dev          # Start Vite dev server only
-pnpm build        # Build frontend (tsc + vite)
-pnpm tauri dev    # Run full app in development mode
-pnpm tauri build  # Build production app
-pnpm lint         # Lint with oxlint (type-aware)
-pnpm fmt          # Format with oxfmt (fmt:check to verify)
-```
-
-## CI
-
-Runs on every push to `main` and on PRs. Validates formatting (`oxfmt --check`), lint (`oxlint`), frontend build (`tsc` + Vite), and Rust compilation (`cargo check` + `cargo clippy`) on an Ubuntu runner.
-
-## Key Patterns
-
-- All backend operations go through Tauri commands in `src-tauri/src/lib.rs`. Frontend calls them via `invoke()` from `@tauri-apps/api/core`.
-- `NotesContext` uses a dual context pattern (data/actions separated) for performance.
-- Settings live in two places: app config at `{APP_DATA}/config.json`, per-folder settings at `{NOTES_FOLDER}/.aether/settings.json`.
-- Tauri v2 permissions go in `src-tauri/capabilities/default.json`.
-
-## Coding Conventions
-
-- Clean, minimal code with low technical debt
-- Proper React patterns (contexts, hooks, memoization)
-- Type-safe with TypeScript throughout
-- No commented-out code or TODOs in production code
-- Use `React.memo` for expensive list-item components
-- Use `useCallback`/`useMemo` for performance-critical paths
-- Debounce user-triggered operations (auto-save 500ms (300ms in source mode), search 150ms, file watcher 500ms, git status 1000ms)
-- All operations should be non-blocking (async)
-- Error handling with user-friendly messages
+Offline-first markdown notes app for macOS, Windows, and Linux. Notes are plain `.md` files in a folder the user picks: no account, no cloud. Optional git sync moves the folder between devices, and private pages are encrypted before git sees them. An `aether` CLI lets AI agents work on the same notes.
 
 ## Docs
 
-- `docs/project-spec.md`: every feature and shortcut, from the user's side.
-- `docs/architecture.md`: code layout, storage on disk, and the main flows (save, commit, pull, merge, private pages, export and import).
+Read the doc for an area before changing it. Update it in the same change when behavior moves.
 
-Read them before working on a feature area.
+- `docs/project-spec.md`: what the app does, from the user's side. Every feature and shortcut.
+- `docs/architecture.md`: code layout, data on disk, events, the save and rename flow, tests. Its feature table points to one doc per feature: `private-pages`, `git-sync`, `cli`, `tabs`, `export-import`, `notion-import`.
+- `docs/releasing.md`: cutting a release.
+- `tests/README.md`: E2E fixture helpers and the fake backend.
 
-## Private Pages
+## How it works
 
-- A private page stays as plaintext on disk. Aether keeps it out of git with a block in `.git/info/exclude`. Aether's commit encrypts it into `.aether/vault/` with the key from the OS keychain, and that encrypted copy is what gets pushed. Logic lives in `src-tauri/src/vault.rs`. The merge editor is in `merge.rs`.
-- Aether installs `pre-commit` and `pre-merge-commit` hooks that refuse terminal commits holding private pages. Never commit or merge from the terminal in a notes folder with private pages, and never use `--no-verify` to get past the hook. Commit through the app.
-- Exports leave private pages out unless the user opts in through a dialog.
+- Rust (`src-tauri/src/`) owns the file system, search (Tantivy), git, and encryption. React + TipTap (`src/`) only renders. They talk through Tauri commands (`invoke()`) and events (`listen()`).
+- A note's id is its path relative to the notes folder, without `.md`. A page's sub-pages live in `Page/` next to `Page.md`. The first heading names the file, so a title edit is a rename, and renames rewrite links across the folder.
+- Other programs edit notes too (another editor, the CLI, an agent). The file watcher emits `file-change`, and the editor reloads the open note or holds unsaved edits until the user picks Refresh or Overwrite.
+- The vault key lives only in the OS keychain and only the app reads it. So the CLI edits files directly, but hands commit and sync to the running app through a file mailbox.
 
-## Testing
+## Where code lives
 
-```bash
-pnpm test         # Rust tests, then Playwright E2E
-pnpm test:rust    # cargo tests only
-pnpm test:e2e     # Playwright against a fake backend (tests/e2e/fake-*.ts)
-```
+- Note behavior (naming, saving, moving, search) belongs in `src-tauri/src/notes.rs`, which the app and the CLI share. Put it there, not in a Tauri command or the CLI, so both keep it.
+- Every Tauri command is in `src-tauri/src/lib.rs`, registered in `generate_handler!`. Each one also gets a wrapper in `src/services/` and a handler in `tests/e2e/fake-backend.ts` returning the same JSON shape.
+- Feature modules: `vault.rs` (private pages), `git.rs` and `merge.rs` (sync), `agent_git.rs` (CLI requests), `relink.rs` (links after moves), `export.rs`, `notion_import.rs`, `bin/aether-cli.rs`.
+- Frontend state is in `src/context/`. `NotesContext` splits data and actions into two contexts so action consumers skip data re-renders. Keep that split.
+- Tauri permissions: `src-tauri/capabilities/default.json`. Per-folder settings (`.aether/settings.json`) are committed to git; device-only state goes in `localStorage` or `.git/`.
+- CLI commands or output changed: update `skills/aether/SKILL.md`, which the app installs for agents.
 
-- Every new Tauri command needs a handler in the E2E fake backend.
-- Never run `cargo fmt`: HEAD is not rustfmt-clean. Format a single file with `rustfmt --edition 2021 <file>`.
+## Taste
 
-## Releasing
+- The notes folder belongs to the user, not to Aether. Write the markdown other apps read: relative links, inline HTML (`<mark>`, `<span style>`) only where markdown has no form. Anything that writes notes emits what the editor's serializer writes, so opening and saving changes nothing.
+- Private plaintext never leaves the device. Not in git, not in a CLI reply or error, not in an export the user did not opt into, not in a temp file outside the notes folder. Treat every new path that lists, reads, or reports notes as a leak until a test proves it filters the private set.
+- Thin edges, one core: commands parse and delegate, services wrap `invoke()`, components render. The core in Rust holds the rules.
+- Typing must feel instant. Blocking work runs in `spawn_blocking`. User-triggered work is debounced.
+- No `any`. Type the fields you actually read and narrow from `unknown`.
+- Comments say why, in a sentence. The code already says what.
+- Errors are sentences the user can act on: "No Notion pages found. In Notion, export as HTML with sub-pages included."
+- If a rule here fights the task in front of you, say so loudly and get sign-off before breaking it.
 
-1. Bump version in `package.json` and `src-tauri/tauri.conf.json`
-2. Commit to `main`, then tag and push: `git tag v0.5.0 && git push origin v0.5.0`
-3. The release workflow builds all platforms and creates a draft GitHub release
-4. Update the description in `latest.json` from GitHub after the action finishes
-5. Review, edit notes, and publish
+## Guardrails
+
+- In a notes folder with private pages, commit and merge only through the app. Aether's `pre-commit` and `pre-merge-commit` hooks refuse terminal commits, and `--no-verify` would push plaintext. Leave the exclude block and `.git/aether-*` files to Aether.
+- Format Rust with `rustfmt --edition 2021 <file>` on files you changed. `cargo fmt` would reformat unrelated code: HEAD is not rustfmt-clean.
+
+## Verify
+
+- `pnpm fmt:check`, `pnpm lint --deny-warnings`, and `pnpm exec tsc`. CI fails on any lint warning.
+- `cargo clippy -- -D warnings` in `src-tauri/`.
+- `pnpm test:e2e <spec>` for the specs your change touches, `pnpm test:rust` for backend changes, then `pnpm test` once at the end.
+- Commits: `type(scope): what changed`, such as `fix(cli): refuse a new name that a private page holds under another case`.
