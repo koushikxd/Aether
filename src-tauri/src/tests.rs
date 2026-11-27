@@ -1912,3 +1912,143 @@ fn reload_settings_takes_in_pins_written_on_disk_and_skips_a_partial_file() {
     assert_eq!(pins(), Some(vec!["New".to_string()]));
     notes.save_artifact("reload_settings_takes_in_pins_written_on_disk_and_skips_a_partial_file");
 }
+
+// Agent requests: the mailbox side the app runs
+
+#[test]
+fn an_agent_request_id_is_read_from_the_arguments_only_when_valid() {
+    use crate::agent_git::{new_id, request_id};
+    let id = new_id();
+    let args = |rest: &[&str]| -> Vec<String> {
+        ["Aether"]
+            .iter()
+            .chain(rest)
+            .map(|a| a.to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        request_id(&args(&["--agent-request", &id])),
+        Some(id.as_str())
+    );
+    assert_eq!(request_id(&args(&["--agent-request"])), None);
+    assert_eq!(
+        request_id(&args(&["--agent-request", "../../config"])),
+        None
+    );
+    assert_eq!(
+        request_id(&args(&["--agent-request", &id.to_uppercase()[..31]])),
+        None
+    );
+    assert_eq!(request_id(&args(&["/notes", &id])), None);
+}
+
+#[test]
+fn an_agent_request_is_taken_once_and_its_reply_lands_whole() {
+    use crate::agent_git::{self, Action, Reply, Request};
+    let mailbox = tempfile::TempDir::new().expect("mailbox");
+    let id = agent_git::new_id();
+    let request = Request {
+        folder: "/notes".into(),
+        action: Action::Sync,
+        message: None,
+    };
+    agent_git::write_json(&agent_git::request_file(mailbox.path(), &id), &request)
+        .expect("write request");
+
+    let taken = agent_git::take_request(mailbox.path(), &id).expect("take request");
+    let again = agent_git::take_request(mailbox.path(), &id);
+    let reply_file = agent_git::reply_file(mailbox.path(), &id);
+    // A temp file left by an earlier failed write does not get in the way.
+    std::fs::create_dir_all(reply_file.parent().expect("responses")).expect("responses dir");
+    std::fs::write(reply_file.with_extension("tmp"), "{\"half").expect("stale temp");
+    agent_git::write_json(&reply_file, &Reply::error("refused")).expect("write reply");
+
+    assert_eq!(taken.action, Action::Sync);
+    assert!(again.is_err());
+    let reply: Reply =
+        serde_json::from_str(&std::fs::read_to_string(&reply_file).expect("reply")).expect("json");
+    assert_eq!(reply.message, "refused");
+    let names: Vec<_> = std::fs::read_dir(reply_file.parent().expect("responses"))
+        .expect("list responses")
+        .map(|e| e.expect("entry").file_name().into_string().expect("utf-8"))
+        .collect();
+    assert_eq!(names, [format!("{id}.json")]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let requests = agent_git::request_file(mailbox.path(), &id);
+        let mode = std::fs::metadata(requests.parent().expect("requests"))
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+}
+
+#[test]
+fn mailbox_files_older_than_the_limit_are_pruned() {
+    use crate::agent_git::{self, Reply};
+    use std::time::{Duration, SystemTime};
+    let mailbox = tempfile::TempDir::new().expect("mailbox");
+    let old = agent_git::request_file(mailbox.path(), &agent_git::new_id());
+    let fresh = agent_git::reply_file(mailbox.path(), &agent_git::new_id());
+    agent_git::write_json(&old, &Reply::error("old")).expect("write old");
+    agent_git::write_json(&fresh, &Reply::error("fresh")).expect("write fresh");
+    let two_hours_ago = SystemTime::now() - Duration::from_secs(7200);
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .and_then(|f| f.set_modified(two_hours_ago))
+        .expect("age the old file");
+
+    agent_git::prune(mailbox.path(), Duration::from_secs(3600));
+
+    assert!(!old.exists());
+    assert!(fresh.exists());
+}
+
+#[test]
+fn an_agent_request_is_refused_when_git_is_turned_off_for_the_folder() {
+    use crate::agent_git::{Action, Outcome, Request};
+    let notes = TestNotes::new();
+    notes.state().settings.write().expect("settings").git_enabled = Some(false);
+    let request = Request {
+        folder: notes.root().to_path_buf(),
+        action: Action::Commit,
+        message: None,
+    };
+
+    let reply = crate::run_agent_request(&notes.state(), &request);
+
+    assert_eq!(reply.outcome, Outcome::Error, "{reply:?}");
+    assert!(reply.message.contains("turned off"), "{}", reply.message);
+}
+
+#[test]
+fn an_agent_request_forwarded_while_the_app_starts_is_answered_once_it_has_started() {
+    use crate::agent_git::{self, Action, Request};
+    use std::time::Duration;
+    use tauri::Manager;
+    let mailbox = tempfile::TempDir::new().expect("mailbox");
+    let mailbox_path = mailbox.path().to_path_buf();
+    let id = agent_git::new_id();
+    let request = Request {
+        folder: mailbox_path.clone(),
+        action: Action::Commit,
+        message: None,
+    };
+    agent_git::write_json(&agent_git::request_file(&mailbox_path, &id), &request)
+        .expect("write request");
+    let app = tauri::test::mock_app();
+    let handle = app.handle().clone();
+    let (worker_mailbox, worker_id) = (mailbox_path.clone(), id.clone());
+
+    let worker =
+        std::thread::spawn(move || crate::answer_agent_request(&handle, &worker_mailbox, &worker_id));
+    std::thread::sleep(Duration::from_millis(200));
+    app.manage(crate::AppState::default());
+
+    assert!(worker.join().is_ok(), "the request handler panicked");
+    assert!(agent_git::reply_file(&mailbox_path, &id).is_file());
+}

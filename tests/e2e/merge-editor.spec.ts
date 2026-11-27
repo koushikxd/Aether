@@ -264,3 +264,34 @@ test("a folder that opens mid-merge shows the merge editor", async ({
   expect(await app.calls("git_pull")).toEqual([]);
   await app.screenshot("merge-editor-on-open");
 });
+
+test("an agent sync that stops on conflicts refreshes git and opens the merge editor", async ({
+  app,
+}) => {
+  await seedConflicts(app, { files: [BANK] });
+  await expect(app.page.getByRole("button", { name: "Sync" })).toBeVisible();
+  await expect(mergeEditor(app)).toHaveCount(0);
+  const statusCalls = (await app.calls("git_get_status")).length;
+
+  // The backend ran the agent's sync and tells the frontend
+  await app.page.evaluate(async () => {
+    const fake = window.aetherFake;
+    const seed = window.aetherFakeConflicts;
+    if (!fake || !seed) throw new Error("Fake backend missing");
+    seed.midMerge = true;
+    await fake.emit("git-state-changed", null);
+  });
+
+  const editor = mergeEditor(app);
+  await expect(editor).toBeVisible();
+  const items = editor
+    .getByRole("list", { name: "Conflicting notes" })
+    .getByRole("button");
+  await expect(items).toHaveCount(1);
+  await expect(items.nth(0)).toContainText("Bank");
+  await expect(items.nth(0)).toContainText("Private");
+  await expect
+    .poll(async () => (await app.calls("git_get_status")).length)
+    .toBeGreaterThan(statusCalls);
+  await app.screenshot("merge-editor-after-agent-sync");
+});

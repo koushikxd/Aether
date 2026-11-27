@@ -13,6 +13,7 @@ src-tauri/src/
   git.rs            git CLI wrappers (status, commit_all, pull, push, merge helpers)
   vault.rs          private pages: encryption, exclude block, hooks, commit/pull integration
   merge.rs          conflicts of an unfinished merge, public and private, for the merge editor
+  agent_git.rs      CLI git requests: the mailbox, the handler the app runs for them, and `status`
   relink.rs         rewrites relative links and image paths after moves
   export.rs         zip export (page with its sub-pages, workspace) and zip import
   notion_import.rs  Notion HTML export import
@@ -32,13 +33,14 @@ tests/e2e/          Playwright specs plus the fake backend
 ## Backend
 
 - `lib.rs` registers every command in `tauri::generate_handler![...]` near the end of `run()`. Blocking work (git, walking the folder, zips, encryption) runs in `tauri::async_runtime::spawn_blocking`.
-- `AppState` holds the app config (notes folder path), the per-folder `Settings`, a notes cache, the file watcher, the Tantivy `SearchIndex`, a watcher debounce map, and the `key_store` (OS keychain, or an in-memory store under `cfg(test)`).
+- `AppState` holds the app config (notes folder path), the per-folder `Settings`, a notes cache, the file watcher, the Tantivy `SearchIndex`, a watcher debounce map, `git_lock`, and the `key_store` (OS keychain, or an in-memory store under `cfg(test)`).
 - Note ids are paths relative to the notes folder, with `/` separators and no `.md`. `id_from_abs_path` and `abs_path_from_id` convert, and the latter rejects path traversal. `EXCLUDED_DIRS` (`.git`, `.aether`, `.obsidian`, `.trash`, `assets`) and the user's ignored folders never hold notes.
 - A sub-page folder is `Page/` next to `Page.md` (`sub_page_dir`). Renames and deletes move or remove both. After a delete or move, `remove_empty_sub_page_dir` removes the old parent's `Page/` when it is empty and `Page.md` exists.
 - A bare page is a folder with no matching `.md` (`bare_page_dir`). `list_notes` lists it with its folder name as title and the folder's mtime. `read_note` returns `# <name>` without writing. `save_note` writes the file on the first save, and `create_bare_page_file` writes it first in `move_note` and `vault_set_private`. `delete_note` removes the folder.
 - Search: Tantivy index in `{APP_DATA}/search_index`, rebuilt when a folder opens and updated on save, create, delete, and watcher events. Queries are phrase-prefix over the title, then the content. A substring search is the fallback.
 - File watcher (`notify`): debounces 500 ms per path, updates the index, and emits `file-change`. When another program changes `.aether/settings.json`, it reloads the settings in `AppState` and emits `settings-changed`, so the app does not write old pins back.
-- Other events: `set-notes-folder` (from `aether open`) and `notion-import-progress`.
+- `git_lock` serializes git work. Every `git_*` command runs through `with_git`, and agent requests take the same lock, so the app and the CLI never run git in one folder at once.
+- Other events: `set-notes-folder` (from `aether open`), `git-state-changed` (after an agent request), and `notion-import-progress`.
 
 ## Frontend
 
@@ -59,6 +61,7 @@ tests/e2e/          Playwright specs plus the fake backend
 | --------------------------------------------------- | ----------------------------------------------------------------- | ------------------------- |
 | `{APP_DATA}/config.json`                            | notes folder path                                                 | n/a                       |
 | `{APP_DATA}/search_index/`                          | Tantivy index                                                     | n/a                       |
+| `{APP_DATA}/agent/requests/`, `responses/`          | CLI git requests and the app's replies, `<id>.json`               | n/a                       |
 | `{NOTES}/**/*.md`, `{NOTES}/assets/`                | notes and their assets                                            | yes, except private files |
 | `{NOTES}/.aether/settings.json`                     | per-folder settings (pins of private pages removed)               | yes                       |
 | `{NOTES}/.aether/vault/vault.json`                  | vault id and key check                                            | yes                       |
@@ -90,7 +93,7 @@ tests/e2e/          Playwright specs plus the fake backend
 - Hooks: `pre-commit` and `pre-merge-commit`, marked `# aether-private-pages`, run `git ls-files --cached --ignored` with only the Aether block's patterns and refuse the commit if anything matches. Aether does not overwrite a hook that is not its own, skips the install when `core.hooksPath` is set, and `--no-verify` bypasses them.
 - Status: `git_get_status` adds `vault::pending_count` (private edits, removals, and mark changes git cannot see) to `changedCount`.
 
-### Commit (`git_commit`)
+### Commit (`git_commit` calls `vault::commit`)
 
 1. `vault::before_commit`: refuses if a public page links to a private page, encrypts changed private files into blobs, deletes blobs of files no longer private, writes root blobs for new marks, rewrites the exclude block, and returns the private file set.
 2. `git::commit_all`: `git add -A`, then `vault::untrack` removes the private files from the index, then `git commit -m`.
@@ -106,7 +109,7 @@ The frontend `sync()` in `GitContext` pulls, then pushes if ahead.
 
 ### Merge editor (merge.rs, `components/git/MergeEditor.tsx`)
 
-When a pull fails, `GitContext` calls `git_conflicts`. If the list is not empty it shows the merge editor. Conflicts come from unmerged index paths; a private blob conflict is decrypted from index stages 1 to 3. Chunks come from `git merge-file` run in a temp dir inside `.git`, so private text never leaves the notes folder. Each file is saved with `git_resolve_conflict` (re-encrypted when private), then `git_finish_merge` commits the merge, decrypts, and the frontend pushes. `git_abort_merge` runs `git merge --abort` and decrypts again.
+When a pull fails, `GitContext` calls `git_conflicts`. If the list is not empty it shows the merge editor. Conflicts come from unmerged index paths; a private blob conflict is decrypted from index stages 1 to 3. Chunks come from `git merge-file` run in a temp dir inside `.git`, so private text never leaves the notes folder. Each file is saved with `git_resolve_conflict` (re-encrypted when private), then `git_finish_merge` commits the merge, decrypts, and the frontend pushes. `git_abort_merge` runs `git merge --abort` and decrypts again. On `git-state-changed`, `GitContext` refreshes the status and the conflicts, so a sync the CLI stopped on conflicts opens the editor.
 
 ### CLI (bin/aether-cli.rs)
 
@@ -116,6 +119,9 @@ When a pull fails, `GitContext` calls `git_conflicts`. If the list is not empty 
 - `read` returns a SHA-256 hash of the markdown. `edit --if-match` compares it before writing. Renames and moves run `notes::after_moves` (links and private marks), then `notes::follow_pins`, which rewrites pins in `.aether/settings.json`.
 - `search` scans the `.md` files with the same matching as the app's fallback search. It does not open the Tantivy index, which the running app holds.
 - `open` and a bare path spawn the app binary next to the CLI, detached, with the path. The app's `handle_cli_args` and the single-instance plugin take it from there.
+- `status` runs in the CLI alone with `GIT_OPTIONAL_LOCKS=0`. It needs no key: private changes come from `vault::pending_count` and the private set.
+- `commit` and `sync`: the app holds the vault key, so the CLI never touches it. The CLI writes a request (folder, action, message) to `{APP_DATA}/agent/requests/<id>.json`, through a temp file and a rename, in folders with mode 0700 on Unix. Then it spawns the app with `--agent-request <id>`. The single-instance plugin forwards that to the running app's `handle_cli_args`, which takes the request, deletes it, and runs `agent_git::handle` under `git_lock`. The reply goes to `responses/<id>.json`, and the CLI polls for it every 100 ms, for up to 10 minutes. The app then emits `git-state-changed`, and on a hand-off it shows its window. At startup the app removes mailbox files older than one hour.
+- `run_agent_request` refuses when git is turned off for the folder, and `agent_git::handle` refuses a folder other than the open one. `commit` runs `vault::commit`, and is refused while a merge is in progress. `sync` runs `vault::pull`, then pushes when ahead. `sync-continue` lists public files that still hold markers (a line starting with 7 or more `<` or `>`, code fences included), refuses while a conflicted page is away from its path (renamed or moved, including a rename that only changes case), stages the rest as they are on disk (`git add -A`, so a removed file is deleted), and hands off when private conflicts remain. Otherwise it runs `merge::finish`, then pushes. `sync-abort` runs `merge::abort`. A public conflicted path that is private on this device counts as private. A reply message that contains a private name, read from before and after the action, as written or as git quotes it, is replaced with a generic one.
 - The Tauri bundler ships every `src/bin` binary next to the app binary: `Contents/MacOS/` on macOS, `usr/bin/` in the deb, next to `Aether.exe` on Windows. No `externalBin` is used.
 - Install (`install.rs`): on macOS and Linux a symlink named `aether` points to the bundled `aether-cli`, in Homebrew's bin folder on macOS and `~/.local/bin` on Linux. It replaces the shell wrapper older versions installed (marked `# AETHER_CLI_WRAPPER`) and never touches an `aether` that Aether did not install. On Windows it copies `aether-cli.exe` to `%LOCALAPPDATA%\com.aether.app\bin\aether.exe`, writes the app's path beside it in `aether-app.txt` (how the copy finds the app for `aether open`), and adds that folder to the user `PATH` in the registry. At startup the Windows app re-copies an installed CLI that an update left out of date. The Linux AppImage refuses to install: it runs from a temporary mount that a link would outlive. Status reads installed only when the entry is this app's CLI.
 - The skill (`skills/aether/SKILL.md`) is embedded with `include_str!` and written to `~/.claude/skills/aether/` and `~/.agents/skills/aether/`.

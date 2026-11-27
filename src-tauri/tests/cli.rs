@@ -20,6 +20,8 @@ struct Cli {
     name: String,
     home: TempDir,
     cwd: PathBuf,
+    /// Extra environment for every run.
+    env: Vec<(&'static str, String)>,
     transcript: String,
 }
 
@@ -31,6 +33,7 @@ impl Cli {
             name: name.to_string(),
             home,
             cwd,
+            env: Vec::new(),
             transcript: String::new(),
         }
     }
@@ -55,6 +58,7 @@ impl Cli {
             .current_dir(&self.cwd)
             .env("HOME", home)
             .env("XDG_DATA_HOME", home.join(".local/share"))
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -513,21 +517,8 @@ fn the_notes_folder_comes_from_the_flag_then_the_cwd_then_the_app_config() {
     let cwd = notes_folder(&[("FromCwd.md", "# FromCwd\n"), ("Deep/Page.md", "# Page\n")]);
     let config = notes_folder(&[("FromConfig.md", "# FromConfig\n")]);
 
-    // The app's config.json, where Tauri's app_data_dir puts it for this identifier.
-    let conf: serde_json::Value =
-        serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
-    let identifier = conf["identifier"].as_str().expect("identifier");
-    let data_dir = if cfg!(target_os = "macos") {
-        cli.home.path().join("Library/Application Support")
-    } else {
-        cli.home.path().join(".local/share")
-    };
     let app_config = serde_json::json!({ "notes_folder": config.path() });
-    write(
-        &data_dir.join(identifier),
-        "config.json",
-        &app_config.to_string(),
-    );
+    write(&app_data(&cli), "config.json", &app_config.to_string());
 
     let out = cli.run(&["--json", "list"]);
     assert_eq!(ids(&json(&out), "pages"), ["FromConfig"], "{}", out.stderr);
@@ -1054,11 +1045,19 @@ impl FakeInstall {
         std::fs::copy(env!("CARGO_BIN_EXE_aether-cli"), bundle.join("aether-cli"))
             .expect("copy cli");
         let app = bundle.join("Aether");
-        // One line per argument, moved into place once written.
+        // One line per argument, moved into place once written. With a
+        // reply to give, it takes an agent request as the app does.
         let script = r#"#!/bin/sh
 d=$(dirname "$0")
 for a in "$@"; do echo "$a"; done > "$d/opened.tmp"
 mv "$d/opened.tmp" "$d/opened.txt"
+if [ "$1" = "--agent-request" ] && [ -f "$d/reply.json" ]; then
+  m=$(cat "$d/mailbox.txt")
+  mv "$m/requests/$2.json" "$d/request.json"
+  mkdir -p "$m/responses"
+  cp "$d/reply.json" "$m/responses/$2.tmp"
+  mv "$m/responses/$2.tmp" "$m/responses/$2.json"
+fi
 "#;
         std::fs::write(&app, script).expect("write fake app");
         std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -1082,6 +1081,22 @@ mv "$d/opened.tmp" "$d/opened.txt"
         std::fs::write(copy.join("aether-app.txt"), app.to_str().expect("utf-8"))
             .expect("write app path");
         copy.join("aether")
+    }
+
+    /// Makes the fake app answer agent requests with `reply`, through the
+    /// mailbox of the CLI session `cli`.
+    fn answer(&self, cli: &Cli, reply: serde_json::Value) {
+        let bundle = self.dir.path().join("bundle");
+        let mailbox = mailbox(cli);
+        write(&bundle, "mailbox.txt", mailbox.to_str().expect("utf-8"));
+        write(&bundle, "reply.json", &reply.to_string());
+    }
+
+    /// The last agent request the fake app took.
+    fn request(&self) -> serde_json::Value {
+        let file = self.dir.path().join("bundle/request.json");
+        let text = std::fs::read_to_string(file).expect("the fake app took no request");
+        serde_json::from_str(&text).expect("request json")
     }
 
     /// The arguments the fake app got, once it has run.
@@ -1152,4 +1167,268 @@ fn a_command_name_wins_over_a_folder_with_that_name() {
     let out = cli.run(&["--json", "list"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(ids(&json(&out), "pages"), ["Page", "list", "list/Inner"]);
+}
+
+/// Runs git in `dir` with a test identity, panicking when it fails.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A notes folder on branch `main` with `files` committed.
+fn committed_notes(files: &[(&str, &str)]) -> TempDir {
+    let notes = notes_folder(files);
+    git(notes.path(), &["checkout", "-q", "-b", "main"]);
+    git(notes.path(), &["add", "-A"]);
+    git(notes.path(), &["commit", "-q", "-m", "start"]);
+    notes
+}
+
+#[test]
+fn status_lists_public_changes_by_id_and_private_ones_as_a_count() {
+    let mut cli = Cli::new("status_lists_public_changes_by_id_and_private_ones_as_a_count");
+    let notes = committed_notes(&[("Public.md", "# Public\n"), ("Public/Sub.md", "# Sub\n")]);
+    write(notes.path(), "Public.md", "# Public\n\nedited\n");
+    write(notes.path(), "New.md", "# New\n");
+    write(notes.path(), "assets/x.png", "png");
+    write(notes.path(), "Secret.md", "# Secret\n");
+    write(notes.path(), "Secret/Child.md", "# Child\n");
+    mark_private(notes.path(), &["Secret"]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&["--folder", folder, "--json", "status"]);
+    let text = cli.run(&["--folder", folder, "status"]);
+
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        json(&out),
+        serde_json::json!({
+            "branch": "main",
+            "ahead": null,
+            "behind": null,
+            "changedPages": ["New", "Public"],
+            "otherChanges": 1,
+            // Two files and the new mark, as the app counts them
+            "privateChanges": 3,
+            "mergeInProgress": false,
+            "syncBlocked": true,
+        })
+    );
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    assert!(text.stdout.contains("New, Public"), "{}", text.stdout);
+    for out in [&out, &text] {
+        for private in ["Secret", "Child"] {
+            assert!(!out.stdout.contains(private), "{}", out.stdout);
+        }
+    }
+}
+
+#[test]
+fn status_reports_ahead_behind_and_a_merge_in_progress() {
+    let mut cli = Cli::new("status_reports_ahead_behind_and_a_merge_in_progress");
+    let remote = TempDir::new().expect("remote");
+    git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let notes = committed_notes(&[("Home.md", "# Home\n")]);
+    let url = remote.path().to_str().expect("utf-8 path");
+    git(notes.path(), &["remote", "add", "origin", url]);
+    git(notes.path(), &["push", "-q", "-u", "origin", "main"]);
+    git(notes.path(), &["checkout", "-q", "-b", "other"]);
+    write(notes.path(), "Home.md", "# Home\n\nfrom other\n");
+    git(notes.path(), &["commit", "-q", "-am", "other"]);
+    git(notes.path(), &["checkout", "-q", "main"]);
+    write(notes.path(), "Home.md", "# Home\n\nfrom main\n");
+    git(notes.path(), &["commit", "-q", "-am", "main"]);
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let ahead = cli.run(&["--folder", folder, "--json", "status"]);
+    let merge = Command::new("git")
+        .args(["merge", "-q", "other"])
+        .current_dir(notes.path())
+        .output()
+        .expect("run git merge");
+    assert!(!merge.status.success(), "the merge should conflict");
+    let merging = cli.run(&["--folder", folder, "--json", "status"]);
+    let text = cli.run(&["--folder", folder, "status"]);
+
+    assert_eq!(ahead.code, 0, "{}", ahead.stderr);
+    let ahead = json(&ahead);
+    assert_eq!(
+        (ahead["ahead"].clone(), ahead["behind"].clone()),
+        (1.into(), 0.into())
+    );
+    assert_eq!(ahead["mergeInProgress"], false);
+    assert_eq!(ahead["syncBlocked"], false);
+    let merging = json(&merging);
+    assert_eq!(merging["mergeInProgress"], true);
+    assert_eq!(merging["changedPages"], serde_json::json!(["Home"]));
+    assert!(
+        text.stdout.contains("aether sync --continue"),
+        "{}",
+        text.stdout
+    );
+}
+
+#[test]
+fn status_outside_a_git_repository_is_an_error() {
+    let mut cli = Cli::new("status_outside_a_git_repository_is_an_error");
+    let notes = TempDir::new().expect("notes folder");
+    write(notes.path(), "Page.md", "# Page\n");
+    let folder = notes.path().to_str().expect("utf-8 path");
+
+    let out = cli.run(&["--folder", folder, "--json", "status"]);
+
+    assert_eq!(out.code, 1);
+    assert_eq!(json(&out)["error"]["code"], "error");
+}
+
+/// The app's data folder in the CLI session's temporary home, where Tauri's
+/// app_data_dir puts it.
+fn app_data(cli: &Cli) -> PathBuf {
+    let conf: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+    let identifier = conf["identifier"].as_str().expect("identifier");
+    let data_dir = if cfg!(target_os = "macos") {
+        cli.home.path().join("Library/Application Support")
+    } else {
+        cli.home.path().join(".local/share")
+    };
+    data_dir.join(identifier)
+}
+
+fn mailbox(cli: &Cli) -> PathBuf {
+    app_data(cli).join("agent")
+}
+
+fn reply(outcome: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({ "outcome": outcome, "message": message })
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_and_sync_ask_the_app_for_the_notes_folder() {
+    let mut cli = Cli::new("commit_and_sync_ask_the_app_for_the_notes_folder");
+    let install = FakeInstall::new();
+    install.answer(&cli, reply("ok", "Changes committed"));
+    let notes = committed_notes(&[("Page.md", "# Page\n")]);
+    let root = notes.path().canonicalize().expect("canonical notes folder");
+    cli.cwd = root.clone();
+
+    let out = cli.run_program(&install.cli(), &["commit", "-m", "Agent notes"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "Changes committed\n");
+    let opened = install.opened();
+    assert_eq!(opened[0], "--agent-request");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    assert_eq!(
+        install.request(),
+        serde_json::json!({
+            "folder": root.to_str().expect("utf-8"),
+            "action": "commit",
+            "message": "Agent notes",
+        })
+    );
+
+    for (args, action) in [
+        (vec!["commit"], "commit"),
+        (vec!["sync"], "sync"),
+        (vec!["sync", "--continue"], "sync-continue"),
+        (vec!["sync", "--abort"], "sync-abort"),
+    ] {
+        let out = cli.run_program(&install.cli(), &args);
+        assert_eq!(out.code, 0, "{args:?}: {}", out.stderr);
+        let request = install.request();
+        assert_eq!(request["action"], action, "{args:?}");
+        assert!(request.get("message").is_none(), "{request}");
+    }
+    let out = cli.run_program(&install.cli(), &["sync", "--continue", "--abort"]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    let left: Vec<_> = std::fs::read_dir(mailbox(&cli).join("requests"))
+        .expect("requests dir")
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn each_reply_from_the_app_has_its_own_exit_code() {
+    let mut cli = Cli::new("each_reply_from_the_app_has_its_own_exit_code");
+    let install = FakeInstall::new();
+    let notes = committed_notes(&[("Page.md", "# Page\n")]);
+    cli.cwd = notes.path().to_path_buf();
+    let wrong_folder = "Aether has a different notes folder open: open this one in Aether first";
+    let conflicts = serde_json::json!({
+        "outcome": "conflicts",
+        "message": "Sync stopped on conflicts",
+        "conflicts": [
+            { "path": "Home.md", "page": "Home" },
+            { "path": ".aether/settings.json", "page": null },
+        ],
+        "privateConflicts": 1,
+    });
+    let handed_off = serde_json::json!({
+        "outcome": "handed_off",
+        "message": "1 private page needs you in Aether",
+        "privateConflicts": 1,
+    });
+
+    install.answer(&cli, reply("error", wrong_folder));
+    let out = cli.run_program(&install.cli(), &["--json", "commit"]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert_eq!(json(&out)["error"]["message"], wrong_folder);
+
+    install.answer(&cli, conflicts);
+    let out = cli.run_program(&install.cli(), &["--json", "sync"]);
+    assert_eq!(out.code, 3, "{}", out.stdout);
+    let error = &json(&out)["error"];
+    assert_eq!(error["code"], "merge_conflicts");
+    assert_eq!(error["conflicts"][0]["page"], "Home");
+    assert_eq!(error["privateConflicts"], 1);
+    let text = cli.run_program(&install.cli(), &["sync"]);
+    assert_eq!(text.code, 3);
+    assert!(text.stderr.contains("Home (Home.md)"), "{}", text.stderr);
+    assert!(
+        text.stderr.contains(".aether/settings.json"),
+        "{}",
+        text.stderr
+    );
+
+    install.answer(&cli, handed_off);
+    let out = cli.run_program(&install.cli(), &["--json", "sync", "--continue"]);
+    assert_eq!(out.code, 4, "{}", out.stdout);
+    let error = &json(&out)["error"];
+    assert_eq!(error["code"], "handed_off");
+    assert_eq!(error["message"], "1 private page needs you in Aether");
+}
+
+#[cfg(unix)]
+#[test]
+fn no_reply_in_time_exits_1_and_takes_back_the_request() {
+    let mut cli = Cli::new("no_reply_in_time_exits_1_and_takes_back_the_request");
+    let install = FakeInstall::new();
+    let notes = committed_notes(&[("Page.md", "# Page\n")]);
+    cli.cwd = notes.path().to_path_buf();
+    cli.env.push(("AETHER_REPLY_TIMEOUT_MS", "300".to_string()));
+
+    let out = cli.run_program(&install.cli(), &["--json", "commit"]);
+
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert_eq!(
+        json(&out)["error"]["message"],
+        "Aether did not answer: check the app"
+    );
+    let left: Vec<_> = std::fs::read_dir(mailbox(&cli).join("requests"))
+        .expect("requests dir")
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }

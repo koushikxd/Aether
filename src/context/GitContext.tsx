@@ -590,6 +590,26 @@ export function GitProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // The agent CLI's commit and sync run in the backend, which then says so.
+  // A sync stopped on conflicts opens the merge editor.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    void listen("git-state-changed", () => {
+      if (!gitEnabledRef.current) return;
+      void refreshStatusRef.current();
+      void gitService.getConflicts().then(setConflicts, (err: unknown) => {
+        setLastError(errorMessage(err, "Failed to read merge conflicts"));
+      });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   const value = useMemo<GitContextValue>(
     () => ({
       status,

@@ -5,6 +5,7 @@
 //! any command that touches one fails with "path unavailable", naming
 //! nothing private.
 
+use aether_lib::agent_git::{self, Action, Outcome, Reply, Request};
 use aether_lib::install;
 use aether_lib::notes::{self, PrivateSet};
 use clap::{Parser, Subcommand};
@@ -13,10 +14,7 @@ use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
-
-/// The app's bundle identifier, which names its data folder (`tauri.conf.json`).
-const APP_IDENTIFIER: &str = "com.aether.app";
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(
@@ -26,7 +24,8 @@ const APP_IDENTIFIER: &str = "com.aether.app";
     about = "Read and write Aether pages from the shell",
     after_help = "A page is named by its id: its path in the notes folder, with / separators \
 and no .md (for example Components/Buttons).\n\n\
-Exit codes: 0 ok, 1 error, 2 not found or unavailable, 3 conflict."
+Exit codes: 0 ok, 1 error, 2 not found or unavailable, 3 conflict (a page changed \
+since it was read, or a sync stopped on conflicts), 4 handed to the app."
 )]
 struct Cli {
     /// Notes folder. Default: the nearest folder above the current directory
@@ -98,6 +97,23 @@ enum PageCommand {
         #[arg(long, value_name = "PAGE")]
         to: String,
     },
+    /// Show the branch, changed pages, private changes as a count, and any merge in progress
+    Status,
+    /// Commit every change through the app, which encrypts the private pages
+    Commit {
+        /// The commit message. Default: "Quick commit from Aether"
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Pull, merge, and push through the app
+    Sync {
+        /// Finish a sync stopped on conflicts, once their markers are gone
+        #[arg(long = "continue", conflicts_with = "abort")]
+        resume: bool,
+        /// Cancel a sync stopped on conflicts
+        #[arg(long)]
+        abort: bool,
+    },
 }
 
 enum Failure {
@@ -106,6 +122,8 @@ enum Failure {
     Conflict,
     Invalid(String),
     Other(String),
+    /// A sync stopped on conflicts, or handed to the app.
+    Sync(Reply),
 }
 
 impl Failure {
@@ -116,6 +134,8 @@ impl Failure {
             Failure::Conflict => "conflict",
             Failure::Invalid(_) => "invalid",
             Failure::Other(_) => "error",
+            Failure::Sync(reply) if reply.outcome == Outcome::HandedOff => "handed_off",
+            Failure::Sync(_) => "merge_conflicts",
         }
     }
 
@@ -124,6 +144,8 @@ impl Failure {
             Failure::NotFound | Failure::Unavailable => 2,
             Failure::Conflict => 3,
             Failure::Invalid(_) | Failure::Other(_) => 1,
+            Failure::Sync(reply) if reply.outcome == Outcome::HandedOff => 4,
+            Failure::Sync(_) => 3,
         }
     }
 
@@ -135,6 +157,7 @@ impl Failure {
                 "the page changed since it was read: read it again and redo the edit".to_string()
             }
             Failure::Invalid(message) | Failure::Other(message) => message.clone(),
+            Failure::Sync(reply) => reply.message.clone(),
         }
     }
 }
@@ -323,7 +346,9 @@ fn notes_root(flag: Option<PathBuf>) -> Result<PathBuf, Failure> {
 
 /// The notes folder open in the app, from `{APP_DATA}/config.json`.
 fn app_notes_folder() -> Option<PathBuf> {
-    let config = dirs::data_dir()?.join(APP_IDENTIFIER).join("config.json");
+    let config = dirs::data_dir()?
+        .join(agent_git::APP_IDENTIFIER)
+        .join("config.json");
     let config: Value = serde_json::from_str(&std::fs::read_to_string(config).ok()?).ok()?;
     let folder = PathBuf::from(config["notes_folder"].as_str()?);
     folder.is_dir().then_some(folder)
@@ -648,6 +673,56 @@ fn check(folder: &Folder) -> Result<Report, Failure> {
     Ok(Report { json, text })
 }
 
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn status(folder: &Folder) -> Result<Report, Failure> {
+    // The app may be committing: a status that refreshed the index could get in its way.
+    std::env::set_var("GIT_OPTIONAL_LOCKS", "0");
+    let status = agent_git::status(&folder.root, &folder.ignored).map_err(Failure::Other)?;
+    let mut lines = vec![match (&status.branch, status.ahead, status.behind) {
+        (Some(branch), Some(ahead), Some(behind)) => {
+            format!("on {branch}, {ahead} ahead and {behind} behind")
+        }
+        (Some(branch), _, _) => format!("on {branch}, with no upstream"),
+        (None, _, _) => "on no branch".to_string(),
+    }];
+    if !status.changed_pages.is_empty() {
+        lines.push(format!(
+            "changed pages: {}",
+            status.changed_pages.join(", ")
+        ));
+    }
+    if status.other_changes > 0 {
+        lines.push(plural(
+            status.other_changes,
+            "other changed file",
+            "other changed files",
+        ));
+    }
+    if status.private_changes > 0 {
+        lines.push(plural(
+            status.private_changes,
+            "private change",
+            "private changes",
+        ));
+    }
+    if status.merge_in_progress {
+        lines.push("a sync is stopped on conflicts: fix them, then run aether sync --continue, or aether sync --abort".to_string());
+    }
+    if status.sync_blocked {
+        lines.push(
+            "sync waits until the private changes are committed: run aether commit".to_string(),
+        );
+    }
+    let json = serde_json::to_value(&status).map_err(|e| Failure::Other(e.to_string()))?;
+    Ok(Report {
+        json,
+        text: lines.iter().map(|line| format!("{line}\n")).collect(),
+    })
+}
+
 /// The app's executable, next to the real CLI binary (inside the bundle on
 /// macOS) whatever symlink on PATH started it, or named by the file beside a copy.
 fn app_executable() -> Result<PathBuf, Failure> {
@@ -677,8 +752,7 @@ fn app_executable() -> Result<PathBuf, Failure> {
         })
 }
 
-/// Starts the app with `path` (none: just the app), detached from this
-/// terminal. A running app gets the path through its single-instance handler.
+/// Starts the app with `path` (none: just the app).
 fn open(path: Option<&Path>) -> Result<Report, Failure> {
     let path = path
         .map(|p| {
@@ -686,8 +760,21 @@ fn open(path: Option<&Path>) -> Result<Report, Failure> {
                 .map_err(|_| Failure::Invalid(format!("no such file or folder: {}", p.display())))
         })
         .transpose()?;
+    spawn_app(path.iter().map(|p| p.as_os_str()))?;
+    let opened = path.as_deref().map(|p| p.display().to_string());
+    Ok(Report {
+        text: opened
+            .as_ref()
+            .map_or(String::new(), |p| format!("opening {p}\n")),
+        json: json!({ "opened": opened }),
+    })
+}
+
+/// Starts the app with `args`, detached from this terminal. A running app
+/// gets them through its single-instance handler.
+fn spawn_app<I: AsRef<std::ffi::OsStr>>(args: impl IntoIterator<Item = I>) -> Result<(), Failure> {
     let mut app = std::process::Command::new(app_executable()?);
-    app.args(&path)
+    app.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -701,14 +788,70 @@ fn open(path: Option<&Path>) -> Result<Report, Failure> {
         app.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     app.spawn()
-        .map_err(|e| Failure::Other(format!("could not start the Aether app: {e}")))?;
-    let opened = path.as_deref().map(|p| p.display().to_string());
-    Ok(Report {
-        text: opened
-            .as_ref()
-            .map_or(String::new(), |p| format!("opening {p}\n")),
-        json: json!({ "opened": opened }),
-    })
+        .map(drop)
+        .map_err(|e| Failure::Other(format!("could not start the Aether app: {e}")))
+}
+
+/// How long to wait for the app's reply. A pull or push can be slow.
+const REPLY_WAIT: Duration = Duration::from_secs(600);
+
+/// `REPLY_WAIT`, or `AETHER_REPLY_TIMEOUT_MS`, which tests set so they need not wait ten minutes.
+fn reply_wait() -> Duration {
+    std::env::var("AETHER_REPLY_TIMEOUT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(REPLY_WAIT, Duration::from_millis)
+}
+
+/// Sends `action` to the app, which holds the key that private pages
+/// need, and waits for its reply.
+fn ask_app(folder: &Folder, action: Action, message: Option<String>) -> Result<Report, Failure> {
+    let mailbox = agent_git::mailbox().map_err(Failure::Other)?;
+    let id = agent_git::new_id();
+    let request_file = agent_git::request_file(&mailbox, &id);
+    let request = Request {
+        folder: folder.root.clone(),
+        action,
+        message,
+    };
+    agent_git::write_json(&request_file, &request).map_err(Failure::Other)?;
+    let reply = spawn_app(["--agent-request", id.as_str()])
+        .and_then(|()| wait_for_reply(&agent_git::reply_file(&mailbox, &id)));
+    // Still there when the app never took it.
+    let _ = std::fs::remove_file(&request_file);
+    match reply? {
+        Reply {
+            outcome: Outcome::Ok,
+            message,
+            ..
+        } => Ok(Report {
+            text: format!("{message}\n"),
+            json: json!({ "message": message }),
+        }),
+        Reply {
+            outcome: Outcome::Error,
+            message,
+            ..
+        } => Err(Failure::Other(message)),
+        reply => Err(Failure::Sync(reply)),
+    }
+}
+
+fn wait_for_reply(file: &Path) -> Result<Reply, Failure> {
+    let deadline = Instant::now() + reply_wait();
+    loop {
+        if let Ok(text) = std::fs::read_to_string(file) {
+            let _ = std::fs::remove_file(file);
+            return serde_json::from_str(&text)
+                .map_err(|e| Failure::Other(format!("could not read Aether's reply: {e}")));
+        }
+        if Instant::now() >= deadline {
+            return Err(Failure::Other(
+                "Aether did not answer: check the app".to_string(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// `aether <path>`: opens `path` when it exists. Anything else is a typo'd command.
@@ -749,14 +892,34 @@ fn run(cli: Cli) -> Result<Report, Failure> {
         PageCommand::Append { page } => append(&folder, &page),
         PageCommand::Edit { page, if_match } => edit(&folder, &page, &if_match),
         PageCommand::Move { page, to } => move_page(&folder, &page, &to),
+        PageCommand::Status => status(&folder),
+        PageCommand::Commit { message } => ask_app(&folder, Action::Commit, message),
+        PageCommand::Sync { resume, abort } => {
+            let action = match (resume, abort) {
+                (true, _) => Action::SyncContinue,
+                (_, true) => Action::SyncAbort,
+                _ => Action::Sync,
+            };
+            ask_app(&folder, action, None)
+        }
     }
 }
 
 fn fail(failure: &Failure, as_json: bool) -> ExitCode {
     eprintln!("aether: {}", failure.message());
+    let mut error = json!({ "code": failure.code(), "message": failure.message() });
+    if let Failure::Sync(reply) = failure {
+        for conflict in &reply.conflicts {
+            match &conflict.page {
+                Some(page) => eprintln!("  {page} ({})", conflict.path),
+                None => eprintln!("  {}", conflict.path),
+            }
+        }
+        error["conflicts"] = json!(reply.conflicts);
+        error["privateConflicts"] = json!(reply.private_conflicts);
+    }
     if as_json {
-        let error = json!({ "error": { "code": failure.code(), "message": failure.message() } });
-        println!("{error}");
+        println!("{}", json!({ "error": error }));
     }
     ExitCode::from(failure.exit_code())
 }

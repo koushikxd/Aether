@@ -1,4 +1,5 @@
-use crate::git::GitResult;
+use crate::agent_git::{self, Action, Outcome, Reply, Request};
+use crate::git::{self, GitResult};
 use crate::merge::ConflictResolution;
 use crate::test_support::{save_text_artifact, TestNotes};
 use crate::vault::{self, VaultStatus};
@@ -1524,4 +1525,412 @@ fn a_terminal_merge_that_brings_a_private_sub_page_is_refused() {
     assert!(!out.status.success(), "merge went through");
     assert!(stderr.contains("Finance/New.md"), "{stderr}");
     assert_holds_none(&tree, &["new-on-b"]);
+}
+
+// Agent requests (agent_git)
+
+fn agent(notes: &TestNotes, action: Action, message: Option<&str>) -> Reply {
+    let request = Request {
+        folder: notes.root().to_path_buf(),
+        action,
+        message: message.map(str::to_string),
+    };
+    let ignored = crate::notes::ignored_dirs(notes.root());
+    agent_git::handle(
+        &request,
+        Some(notes.root()),
+        &ignored,
+        notes.state().key_store.as_ref(),
+    )
+}
+
+fn assert_ok(reply: &Reply) {
+    assert_eq!(reply.outcome, Outcome::Ok, "{reply:?}");
+}
+
+fn conflict_pages(reply: &Reply) -> Vec<&str> {
+    reply
+        .conflicts
+        .iter()
+        .map(|c| c.page.as_deref().unwrap_or(&c.path))
+        .collect()
+}
+
+#[test]
+fn an_agent_commit_encrypts_private_pages_and_passes_the_hook() {
+    let notes = repo();
+    finance_notes(&notes);
+    generate(&notes);
+    set_private(&notes, &["Finance"], true).expect("mark");
+
+    let committed = agent(&notes, Action::Commit, None);
+    let stat = git(notes.root(), &["show", "--stat", "--format=%s", "HEAD"]);
+    let tree = committed_tree(notes.root());
+
+    artifact(
+        "an_agent_commit_encrypts_private_pages_and_passes_the_hook",
+        &[("notes", &notes)],
+    );
+    assert_ok(&committed);
+    assert!(notes.root().join(".git/hooks/pre-commit").is_file());
+    assert!(stat.starts_with("Quick commit from Aether\n"), "{stat}");
+    assert!(stat.contains(".aether/vault/files/"), "{stat}");
+    assert!(stat.contains("Home.md"), "{stat}");
+    assert_holds_none(&stat, &["Finance", "Bank", "card.png"]);
+    assert_holds_none(&tree, &["secret-balance-4242", "line two"]);
+
+    notes.write("Home.md", "# Home\n\nagain\n");
+    assert_ok(&agent(&notes, Action::Commit, Some("Agent message")));
+    assert_eq!(
+        git(notes.root(), &["log", "-1", "--format=%s"]),
+        "Agent message\n"
+    );
+}
+
+#[test]
+fn an_agent_commit_of_a_link_to_a_private_page_is_refused_without_naming_it() {
+    let notes = repo();
+    finance_notes(&notes);
+    notes.write("Home.md", "# Home\n\n[Bank](Finance/Bank.md)\n");
+    generate(&notes);
+    set_private(&notes, &["Finance"], true).expect("mark");
+
+    let refused = agent(&notes, Action::Commit, None);
+
+    artifact(
+        "an_agent_commit_of_a_link_to_a_private_page_is_refused_without_naming_it",
+        &[("notes", &notes)],
+    );
+    assert_eq!(refused.outcome, Outcome::Error, "{refused:?}");
+    assert!(refused.message.contains("Home"), "{}", refused.message);
+    assert_holds_none(&refused.message, &["Finance", "Bank"]);
+    assert!(git_out(notes.root(), &["log"]).stdout.is_empty());
+}
+
+#[test]
+fn an_agent_sync_carries_changes_between_clones_and_refuses_uncommitted_private_edits() {
+    let c = clones();
+    enter(&c.b, &c.key).expect("enter key");
+    c.a.write(
+        "Finance/Bank.md",
+        "# Bank\n\nedited on A\n\n![](../assets/card.png)\n",
+    );
+    c.a.write("Home.md", "# Home\n\nhello from A\n");
+
+    let a_committed = agent(&c.a, Action::Commit, None);
+    let a_synced = agent(&c.a, Action::Sync, None);
+    let b_synced = agent(&c.b, Action::Sync, None);
+    c.b.write("Finance.md", "# Finance\n\nedited on B\n");
+    let refused = agent(&c.b, Action::Sync, None);
+
+    artifact(
+        "an_agent_sync_carries_changes_between_clones_and_refuses_uncommitted_private_edits",
+        &[("a", &c.a), ("b", &c.b)],
+    );
+    assert_ok(&a_committed);
+    assert_ok(&a_synced);
+    assert_ok(&b_synced);
+    assert_eq!(c.b.read("Home.md"), "# Home\n\nhello from A\n");
+    assert_eq!(
+        c.b.read("Finance/Bank.md"),
+        "# Bank\n\nedited on A\n\n![](../assets/card.png)\n"
+    );
+    assert_eq!(refused.outcome, Outcome::Error, "{refused:?}");
+    assert!(refused.message.contains("Commit"), "{}", refused.message);
+    assert_eq!(c.b.read("Finance.md"), "# Finance\n\nedited on B\n");
+    assert_holds_none(
+        &remote_objects(&c.remote),
+        &["secret-balance-4242", "edited on A"],
+    );
+}
+
+/// Both clones edit Home.md on the same line. A syncs first; B commits.
+fn public_conflict() -> Clones {
+    let c = clones();
+    enter(&c.b, &c.key).expect("enter key");
+    c.a.write("Home.md", "# Home\n\nhello from A\n");
+    assert_ok(&agent(&c.a, Action::Commit, None));
+    assert_ok(&agent(&c.a, Action::Sync, None));
+    c.b.write("Home.md", "# Home\n\nhello from B\n");
+    assert_ok(&agent(&c.b, Action::Commit, None));
+    c
+}
+
+#[test]
+fn public_conflicts_are_listed_and_continue_waits_for_the_markers_to_go() {
+    let c = public_conflict();
+
+    let synced = agent(&c.b, Action::Sync, None);
+    let marked = c.b.read("Home.md");
+    let early = agent(&c.b, Action::SyncContinue, None);
+    let mid_merge_commit = agent(&c.b, Action::Commit, None);
+    let still_merging = git::merge_in_progress(c.b.root());
+    c.b.write("Home.md", "# Home\n\n```\n<<<<<<< HEAD\nhello\n```\n");
+    let fenced = agent(&c.b, Action::SyncContinue, None);
+    c.b.write(
+        "Home.md",
+        "# Home\n\n<<<<<<<<<<<< HEAD\nhello\n>>>>>>>>>>>> theirs\n",
+    );
+    let wide = agent(&c.b, Action::SyncContinue, None);
+    c.b.write("Home.md", "# Home\n\nhello from both\n");
+    let finished = agent(&c.b, Action::SyncContinue, None);
+    let a_synced = agent(&c.a, Action::Sync, None);
+
+    artifact(
+        "public_conflicts_are_listed_and_continue_waits_for_the_markers_to_go",
+        &[("a", &c.a), ("b", &c.b)],
+    );
+    assert_eq!(synced.outcome, Outcome::Conflicts, "{synced:?}");
+    assert_eq!(conflict_pages(&synced), ["Home"]);
+    assert_eq!(synced.private_conflicts, 0);
+    assert!(marked.contains("<<<<<<<"), "{marked}");
+    assert_eq!(early.outcome, Outcome::Conflicts, "{early:?}");
+    assert_eq!(conflict_pages(&early), ["Home"]);
+    assert_eq!(
+        mid_merge_commit.outcome,
+        Outcome::Error,
+        "{mid_merge_commit:?}"
+    );
+    assert!(
+        mid_merge_commit.message.contains("sync --continue"),
+        "{}",
+        mid_merge_commit.message
+    );
+    assert!(still_merging);
+    assert_eq!(fenced.outcome, Outcome::Conflicts, "{fenced:?}");
+    assert_eq!(wide.outcome, Outcome::Conflicts, "{wide:?}");
+    assert_ok(&finished);
+    assert!(!git::merge_in_progress(c.b.root()));
+    assert_eq!(
+        git(c.b.root(), &["rev-parse", "HEAD"]),
+        git(&c.remote, &["rev-parse", "main"])
+    );
+    assert_ok(&a_synced);
+    assert_eq!(c.a.read("Home.md"), "# Home\n\nhello from both\n");
+    assert_eq!(c.b.read("Finance.md"), "# Finance\n\nsecret-balance-4242\n");
+}
+
+#[test]
+fn continue_commits_each_conflicted_file_as_the_agent_left_it() {
+    let c = clones();
+    enter(&c.b, &c.key).expect("enter key");
+    c.a.write_bytes("data.bin", &[0xff, 0]);
+    c.a.write("notes.txt", "base\n");
+    assert_ok(&agent(&c.a, Action::Commit, None));
+    assert_ok(&agent(&c.a, Action::Sync, None));
+    assert_ok(&agent(&c.b, Action::Sync, None));
+    c.a.write_bytes("data.bin", &[0xff, 1]);
+    c.a.write("notes.txt", "from A\n");
+    assert_ok(&agent(&c.a, Action::Commit, None));
+    assert_ok(&agent(&c.a, Action::Sync, None));
+    c.b.write_bytes("data.bin", &[0xff, 2]);
+    c.b.write("notes.txt", "from B\n");
+    assert_ok(&agent(&c.b, Action::Commit, None));
+
+    let synced = agent(&c.b, Action::Sync, None);
+    c.b.write_bytes("data.bin", &[0xff, 3]);
+    std::fs::remove_file(c.b.root().join("notes.txt")).expect("remove");
+    let finished = agent(&c.b, Action::SyncContinue, None);
+
+    artifact(
+        "continue_commits_each_conflicted_file_as_the_agent_left_it",
+        &[("b", &c.b)],
+    );
+    assert_eq!(conflict_pages(&synced), ["data.bin", "notes.txt"]);
+    assert_ok(&finished);
+    let data = git_out(c.b.root(), &["show", "HEAD:data.bin"]).stdout;
+    assert_eq!(data, [0xff, 3]);
+    assert!(!git_out(c.b.root(), &["cat-file", "-e", "HEAD:notes.txt"])
+        .status
+        .success());
+}
+
+#[test]
+fn continue_refuses_while_a_conflicted_page_is_away_from_its_path() {
+    let c = public_conflict();
+    assert_eq!(agent(&c.b, Action::Sync, None).outcome, Outcome::Conflicts);
+    std::fs::remove_file(c.b.root().join("Home.md")).expect("remove");
+    c.b.write("Hello.md", "# Hello\n\nhello from both\n");
+
+    let renamed = agent(&c.b, Action::SyncContinue, None);
+    let still_merging = git::merge_in_progress(c.b.root());
+    std::fs::remove_file(c.b.root().join("Hello.md")).expect("remove");
+    c.b.write("Home.md", "# Home\n\nhello from both\n");
+    let finished = agent(&c.b, Action::SyncContinue, None);
+
+    artifact(
+        "continue_refuses_while_a_conflicted_page_is_away_from_its_path",
+        &[("b", &c.b)],
+    );
+    assert_eq!(renamed.outcome, Outcome::Error, "{renamed:?}");
+    assert!(renamed.message.contains("Home.md"), "{}", renamed.message);
+    assert!(still_merging);
+    assert_ok(&finished);
+}
+
+#[test]
+fn continue_refuses_while_a_conflicted_page_is_renamed_only_in_case() {
+    let c = public_conflict();
+    assert_eq!(agent(&c.b, Action::Sync, None).outcome, Outcome::Conflicts);
+    c.b.write("Home.md", "# Home\n\nhello from both\n");
+    let (spelled, lower, temp) = (
+        c.b.root().join("Home.md"),
+        c.b.root().join("home.md"),
+        c.b.root().join("temp.md"),
+    );
+    std::fs::rename(&spelled, &temp).expect("rename");
+    std::fs::rename(&temp, &lower).expect("rename");
+
+    let renamed = agent(&c.b, Action::SyncContinue, None);
+    let still_merging = git::merge_in_progress(c.b.root());
+    std::fs::rename(&lower, &temp).expect("rename");
+    std::fs::rename(&temp, &spelled).expect("rename");
+    let finished = agent(&c.b, Action::SyncContinue, None);
+
+    artifact(
+        "continue_refuses_while_a_conflicted_page_is_renamed_only_in_case",
+        &[("b", &c.b)],
+    );
+    assert_eq!(renamed.outcome, Outcome::Error, "{renamed:?}");
+    assert!(renamed.message.contains("Home.md"), "{}", renamed.message);
+    assert!(still_merging);
+    assert_ok(&finished);
+    assert_eq!(git(c.b.root(), &["ls-files", "Home.md"]).trim(), "Home.md");
+}
+
+#[test]
+fn a_reply_naming_a_private_page_the_way_git_quotes_it_is_withheld() {
+    let names = std::collections::BTreeSet::from(["Finance/B\u{e4}nk/Link.md".to_string()]);
+    let reply = Reply::error("refused:\n  \"Finance/B\\303\\244nk/Link.md\"");
+
+    let redacted = agent_git::redact(reply, &[Ok(names)]);
+
+    assert!(
+        !redacted.message.contains("nk/Link.md"),
+        "{}",
+        redacted.message
+    );
+}
+
+#[test]
+fn an_agent_abort_restores_the_state_before_the_sync() {
+    let c = public_conflict();
+    let head = git(c.b.root(), &["rev-parse", "HEAD"]);
+
+    let synced = agent(&c.b, Action::Sync, None);
+    let aborted = agent(&c.b, Action::SyncAbort, None);
+
+    artifact(
+        "an_agent_abort_restores_the_state_before_the_sync",
+        &[("b", &c.b)],
+    );
+    assert_eq!(synced.outcome, Outcome::Conflicts, "{synced:?}");
+    assert_ok(&aborted);
+    assert!(!git::merge_in_progress(c.b.root()));
+    assert_eq!(git(c.b.root(), &["rev-parse", "HEAD"]), head);
+    assert_eq!(c.b.read("Home.md"), "# Home\n\nhello from B\n");
+    assert_eq!(c.b.read("Finance.md"), "# Finance\n\nsecret-balance-4242\n");
+    assert_eq!(git(c.b.root(), &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_private_conflict_is_handed_off_and_never_named() {
+    let c = conflicted();
+
+    let synced = agent(&c.b, Action::Sync, None);
+    c.b.write("Home.md", "# Home\n\nhello from both\n");
+    let continued = agent(&c.b, Action::SyncContinue, None);
+    let unmerged = git(c.b.root(), &["diff", "--name-only", "--diff-filter=U"]);
+
+    artifact(
+        "a_private_conflict_is_handed_off_and_never_named",
+        &[("b", &c.b)],
+    );
+    assert_eq!(synced.outcome, Outcome::Conflicts, "{synced:?}");
+    assert_eq!(conflict_pages(&synced), ["Home"]);
+    assert_eq!(synced.private_conflicts, 1);
+    assert_eq!(continued.outcome, Outcome::HandedOff, "{continued:?}");
+    assert!(continued.conflicts.is_empty(), "{continued:?}");
+    assert_eq!(continued.private_conflicts, 1);
+    assert!(
+        continued.message.contains("1 private page"),
+        "{continued:?}"
+    );
+    assert!(!unmerged.contains("Home.md"), "{unmerged}");
+    assert!(git::merge_in_progress(c.b.root()));
+    for reply in [&synced, &continued] {
+        let json = serde_json::to_string(reply).expect("json");
+        assert_holds_none(&json, &["Finance", "Bank", "line two", ".enc"]);
+    }
+}
+
+#[test]
+fn an_agent_request_for_another_folder_is_refused() {
+    let notes = repo();
+    let other = TempDir::new().expect("other folder");
+    let request = Request {
+        folder: other.path().to_path_buf(),
+        action: Action::Commit,
+        message: None,
+    };
+
+    let replies = [
+        agent_git::handle(
+            &request,
+            Some(notes.root()),
+            &[],
+            notes.state().key_store.as_ref(),
+        ),
+        agent_git::handle(&request, None, &[], notes.state().key_store.as_ref()),
+    ];
+
+    for reply in replies {
+        assert_eq!(reply.outcome, Outcome::Error);
+        assert_eq!(
+            reply.message,
+            "Aether has a different notes folder open: open this one in Aether first"
+        );
+    }
+}
+
+#[test]
+fn app_git_work_and_agent_requests_wait_for_each_other() {
+    let notes = repo();
+    notes.write("Home.md", "# Home\n");
+    let request = Request {
+        folder: notes.root().to_path_buf(),
+        action: Action::Commit,
+        message: None,
+    };
+    let state = notes.state();
+
+    let held = state.git_lock.lock().expect("git lock");
+    let (waited, reply, committed) = std::thread::scope(|s| {
+        let agent = s.spawn(|| crate::run_agent_request(&state, &request));
+        let app = s.spawn(|| block_on(crate::git_commit("App".to_string(), state.clone())));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let waited = !agent.is_finished() && !app.is_finished();
+        drop(held);
+        let reply = agent.join().expect("agent thread");
+        let committed = app.join().expect("app thread").expect("git_commit");
+        (waited, reply, committed)
+    });
+
+    assert!(waited, "git work ran while the lock was held");
+    // One commits, the other finds nothing left.
+    assert_ok(&reply);
+    assert!(committed.success, "{:?}", committed.error);
+    assert_eq!(git(notes.root(), &["rev-list", "--count", "HEAD"]), "1\n");
+}
+
+#[test]
+fn an_agent_commit_with_nothing_to_commit_succeeds() {
+    let notes = repo();
+    notes.write("Home.md", "# Home\n");
+    assert_ok(&agent(&notes, Action::Commit, None));
+
+    let again = agent(&notes, Action::Commit, None);
+
+    assert_ok(&again);
+    assert_eq!(again.message, "Nothing to commit");
 }

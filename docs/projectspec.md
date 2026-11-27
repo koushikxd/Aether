@@ -87,6 +87,7 @@ When a pull conflicts, a "Resolve conflicts" dialog lists the conflicting notes,
 - Binary files and files deleted on one side can only keep one side.
 - Finishing commits the merge and pushes. "Cancel sync" aborts the merge and restores the state before the pull.
 - If the folder opens in the middle of a merge, the dialog opens again.
+- A sync from the CLI that stops on conflicts opens the dialog in the running app.
 
 ## Private pages
 
@@ -115,6 +116,9 @@ Edit the current note with a local CLI: Claude Code, OpenAI Codex, OpenCode, or 
   - The notes folder is `--folder`, else the nearest folder above the current directory that holds `.aether/`, else the folder open in the app.
   - Private pages do not exist for the CLI. A command that touches one fails with `path unavailable` and names nothing.
   - `read` prints a hash. `edit` needs it as `--if-match <hash>` and fails with exit code 3 if the page changed since. A new first heading renames the page and rewrites links, as in the app. Moves and renames keep pins.
+  - `status` shows the branch, ahead and behind, changed public pages by id, and private changes only as a count. It works with the app closed.
+  - `commit [-m <message>]` and `sync` hand the work to the app, starting it if needed, because only the app holds the vault key. The app answers only for the notes folder it has open. Replies never name a private page.
+  - `sync` that stops on conflicts exits with code 3 and lists the public conflicting files. Fix their markers, then `sync --continue` finishes the merge and pushes, or `sync --abort` cancels it. When private pages conflict too, `--continue` exits with code 4 and the app brings its merge editor forward for them.
   - `aether .` or `aether open <folder>` opens a folder as the notes folder. `aether note.md` opens a note. `aether` alone starts the app.
 - Install Agent Skill writes a skill that teaches agents to use the CLI when you ask them to work with your notes, to `~/.claude/skills/aether/` (Claude Code) and `~/.agents/skills/aether/` (Codex and other agents). The button reads Update Agent Skill when an installed copy differs from this version of Aether.
 
