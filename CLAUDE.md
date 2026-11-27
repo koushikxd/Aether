@@ -40,7 +40,7 @@ Runs on every push to `main` and on PRs. Validates formatting (`oxfmt --check`),
 
 ## Docs
 
-- `docs/projectspec.md`: every feature and shortcut, from the user's side.
+- `docs/project-spec.md`: every feature and shortcut, from the user's side.
 - `docs/architecture.md`: code layout, storage on disk, and the main flows (save, commit, pull, merge, private pages, export and import).
 
 Read them before working on a feature area.
