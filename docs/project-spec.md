@@ -6,16 +6,21 @@ Aether is an offline-first markdown note-taking app for macOS, Windows, and Linu
 
 - On first launch you pick a notes folder. Every `.md` file in it (recursively) is a note.
 - A note's file name follows its title (the first heading). Renaming the title renames the file. Name clashes get a `-1`, `-2` suffix.
-- New notes use the "Default Note Name" template from settings. Tags such as `{date}`, `{time}`, `{year}`, `{month}`, `{day}`, `{weekday}`, `{timestamp}` and `{counter}` are expanded.
+- New notes use the "Default Note Name" template from settings. Tags such as `{date}`, `{time}`, `{year}`, `{month}`, `{day}`, `{weekday}`, `{timestamp}` and `{counter}` are expanded. With the default name, "Untitled", the file starts empty and the title shows "Untitled" as a placeholder; any other template is written as the title.
 - Images and attached files are copied into `assets/` at the root of the folder and linked with relative paths, so the folder works in other markdown apps.
 - App folders (`.git`, `.aether`, `.obsidian`, `.trash`, `assets`) never hold notes. Common build folders (`node_modules`, `dist`, `target`, ...) are ignored by default. The list is editable under Settings, Ignored Folders.
 - Edits made outside the app (another editor, an AI agent) are picked up by a file watcher.
 
+## Home
+
+With no note open, the editor area shows the home view: New note, Search notes, and the five most recently modified pages, newest first, with how long ago each changed. A sub-page shows its parent's path. Click a page to open it; `Cmd+click` opens it in a new tab.
+
 ## Sidebar
 
+- The sidebar has no title row. Its top row shares the title bar with the window controls and holds Search (opens Search Notes) and "+" (new top-level page).
 - The sidebar is a page tree. Sub-pages sit under their page, which expands and collapses. Pages are ordered by last modified, newest first, at every level.
 - A "Pinned" section above the tree lists pinned pages, sub-pages included, in the order they were pinned. Pinned pages also stay in their place in the tree.
-- The "+" on a row (shown on hover) creates a sub-page of that page. `Cmd+N`, the "+" in the sidebar header, and New Note in the command menu create a top-level page.
+- The "+" on a row (shown on hover) creates a sub-page of that page. `Cmd+N`, the "+" at the top of the sidebar, the New note row on the home view, and New Note in the command menu create a top-level page.
 - The row context menu has new sub-page, pin, duplicate, copy file path, select multiple, make private or public, move to, move to parent page, and delete.
 - Drag a page onto another page to make it a sub-page. Drop it on the empty space below the tree to move it to the top level.
 - "Move to..." opens a searchable list of pages plus "Top level". It is in the row menu, the selection bar, and the command menu. The list leaves out the moved pages and their sub-pages.
@@ -45,6 +50,7 @@ Notes open in tabs shown in the editor header. A plain open replaces the active 
 ## Editor
 
 - WYSIWYG editing (TipTap) that saves as markdown. Saving is automatic.
+- Every page starts with a title: an H1 as the first block, after any frontmatter. An empty title shows "Untitled" in grey and is left out of the file, so a page without a heading opens and saves unchanged. Backspace and deleting everything leave the title in place.
 - Markdown source mode toggles with `Cmd+Shift+M`.
 - Slash menu (`/`): text, headings 1 to 4, bullet, numbered and task lists, blockquote, code block, callout, toggle, Mermaid diagram, block and inline math, horizontal rule, file, image, table, sub-page, wikilink.
 - Selecting text shows a toolbar: turn into another block type, bold, italic and other marks, text color, and link.

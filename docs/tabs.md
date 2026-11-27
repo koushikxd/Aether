@@ -1,6 +1,6 @@
 # Tabs
 
-Aether opens notes in tabs, like a browser. Each tab shows one note and keeps its own back and forward history. The tab strip sits in the editor header, after the sidebar toggle.
+Aether opens notes in tabs, like a browser. Each tab shows one note and keeps its own back and forward history. The tab strip sits in the editor header. The sidebar toggle is pinned beside the window controls, so with the sidebar hidden the strip starts after it.
 
 ## Behavior
 
