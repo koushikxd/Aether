@@ -21,7 +21,7 @@ With no note open, the editor area shows the home view: New note, Search notes, 
 - The sidebar is a page tree. Sub-pages sit under their page, which expands and collapses. Pages are ordered by last modified, newest first, at every level.
 - A "Pinned" section above the tree lists pinned pages, sub-pages included, in the order they were pinned. Pinned pages also stay in their place in the tree.
 - The "+" on a row (shown on hover) creates a sub-page of that page. `Cmd+N`, the "+" at the top of the sidebar, the New note row on the home view, and New Note in the command menu create a top-level page.
-- The row context menu has new sub-page, pin, duplicate, copy file path, select multiple, make private or public, move to, move to parent page, and delete.
+- The row menu opens on right-click or from the "..." shown on hover. It has new sub-page, pin, duplicate, copy file path, select multiple, make private or public, move to, move to parent page, and delete.
 - Drag a page onto another page to make it a sub-page. Drop it on the empty space below the tree to move it to the top level.
 - "Move to..." opens a searchable list of pages plus "Top level". It is in the row menu, the selection bar, and the command menu. The list leaves out the moved pages and their sub-pages.
 - `Up` and `Down` outside the sidebar move through the rows the tree shows, in order.

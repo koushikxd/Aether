@@ -42,6 +42,7 @@ import {
   ArrowUpIcon,
   LockIcon,
   CheckSquareIcon,
+  MoreHorizontalIcon,
 } from "../icons";
 import { useNoteRowClick, type SetNoteIds } from "./useNoteRowClick";
 import { useVault } from "../../context/VaultContext";
@@ -182,7 +183,7 @@ const FileItem = memo(function FileItem({
           }}
           {...attributes}
           {...listeners}
-          className={`group/row flex items-center gap-1.5 py-1.5 cursor-pointer rounded-md select-none transition-colors ${
+          className={`group/row flex items-center gap-2 py-[7px] cursor-pointer rounded-md select-none transition-colors data-[state=open]:bg-bg-muted ${
             isDragging
               ? "opacity-40"
               : isOver
@@ -213,17 +214,17 @@ const FileItem = memo(function FileItem({
               }}
             >
               {subPagesExpanded ? (
-                <ChevronDownIcon className="w-4 h-4 stroke-[1.6] text-text-muted/60" />
+                <ChevronDownIcon className="w-4.5 h-4.5 stroke-[1.6] text-text-muted/60" />
               ) : (
-                <ChevronRightIcon className="w-4 h-4 stroke-[1.6] text-text-muted/60" />
+                <ChevronRightIcon className="w-4.5 h-4.5 stroke-[1.6] text-text-muted/60" />
               )}
             </span>
           )}
           {isPinned ? (
-            <PinIcon className="w-4 h-4 stroke-[1.6] fill-current text-text-muted shrink-0" />
+            <PinIcon className="w-4.5 h-4.5 stroke-[1.6] fill-current text-text-muted shrink-0" />
           ) : (
             subPagesExpanded === undefined && (
-              <NoteIcon className="w-4 h-4 stroke-[1.6] opacity-50 shrink-0" />
+              <NoteIcon className="w-4.5 h-4.5 stroke-[1.6] opacity-50 shrink-0" />
             )
           )}
           <span className="flex-1 min-w-0 text-sm text-text truncate">
@@ -234,13 +235,35 @@ const FileItem = memo(function FileItem({
             data-new-sub-page
             aria-hidden="true"
             title="New sub-page"
-            className="hidden group-hover/row:flex shrink-0 rounded-sm hover:bg-bg-emphasis"
+            className="hidden group-hover/row:flex group-data-[state=open]/row:flex shrink-0 rounded-sm hover:bg-bg-emphasis"
             onClick={(e) => {
               e.stopPropagation();
               onNewSubPage(note.id);
             }}
           >
-            <PlusIcon className="w-4 h-4 stroke-[1.6] text-text-muted" />
+            <PlusIcon className="w-4.5 h-4.5 stroke-[1.6] text-text-muted" />
+          </span>
+          {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- mouse shortcut for the row menu, which the keyboard opens with the context menu key */}
+          <span
+            data-row-menu
+            aria-hidden="true"
+            title="More"
+            className="hidden group-hover/row:flex group-data-[state=open]/row:flex shrink-0 rounded-sm hover:bg-bg-emphasis"
+            onClick={(e) => {
+              e.stopPropagation();
+              // Radix opens its context menu only from a contextmenu event, so
+              // the ... sends one from its own bottom-left corner
+              const box = e.currentTarget.getBoundingClientRect();
+              itemRef.current?.dispatchEvent(
+                new MouseEvent("contextmenu", {
+                  bubbles: true,
+                  clientX: box.left,
+                  clientY: box.bottom,
+                }),
+              );
+            }}
+          >
+            <MoreHorizontalIcon className="w-4.5 h-4.5 stroke-[1.6] text-text-muted" />
           </span>
           {isPrivate && (
             <span data-private-icon className="shrink-0">

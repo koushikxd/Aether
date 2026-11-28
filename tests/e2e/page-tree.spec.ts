@@ -282,3 +282,42 @@ test("arrow keys outside the tree follow the tree order", async ({ app }) => {
   await expect(app.editor).toContainText("Child body.");
   await app.screenshot("arrow-down-follows-tree");
 });
+
+test("the ... on a row opens the row menu below it", async ({ app }) => {
+  await app.seed({
+    "Page.md": "# Page\n",
+    "Page/Child.md": "# Child\n",
+  });
+
+  await app.row("Child").hover();
+  const more = app.row("Child").locator("[data-row-menu]");
+  const button = await more.boundingBox();
+  await more.click();
+  await expect(app.page.getByRole("menuitem")).toHaveText([
+    "New sub-page",
+    "Pin",
+    "Duplicate",
+    "Copy Filepath",
+    "Select Multiple",
+    "Make private",
+    "Move to...",
+    "Move to Parent Page",
+    "Delete",
+  ]);
+  const menu = await app.page.getByRole("menu").boundingBox();
+  expect(menu!.y).toBeGreaterThanOrEqual(button!.y + button!.height);
+  await app.screenshot("row-more-menu");
+
+  // The ... opens the menu without opening the page
+  await app.page.keyboard.press("Escape");
+  await expect(app.editor).toBeHidden();
+});
+
+test("sidebar rows use 15px text and roomy rows", async ({ app }) => {
+  await app.seed({ "Page.md": "# Page\n" });
+  const title = app.row("Page").getByText("Page", { exact: true });
+  await expect(title).toHaveCSS("font-size", "15px");
+  const row = await app.row("Page").boundingBox();
+  expect(row!.height).toBeGreaterThanOrEqual(34);
+  await app.screenshot("sidebar-row-size");
+});
