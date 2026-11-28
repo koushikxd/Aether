@@ -44,7 +44,7 @@ const DEFAULT_CUSTOM_WIDTH_PX = 768;
 // Default editor font settings (simplified)
 const defaultEditorFontSettings: Required<EditorFontSettings> = {
   baseFontFamily: "system-sans",
-  baseFontSize: 15,
+  baseFontSize: 16,
   boldWeight: 600,
   lineHeight: 1.6,
 };

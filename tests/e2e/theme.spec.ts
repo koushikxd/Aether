@@ -43,3 +43,12 @@ test("the page has no drag grips at its edges", async ({ app }) => {
 
   await app.screenshot("page-no-width-grips");
 });
+
+test("the editor body text defaults to 16px", async ({ app }) => {
+  await app.seed({ "Welcome.md": "# Welcome\n\nBody text.\n" });
+  await app.open("Welcome");
+  await expect(app.editor.getByText("Body text.")).toHaveCSS(
+    "font-size",
+    "16px",
+  );
+});

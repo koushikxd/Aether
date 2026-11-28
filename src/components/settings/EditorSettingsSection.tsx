@@ -104,7 +104,7 @@ export function AppearanceSettingsSection() {
   // Check if settings differ from defaults
   const hasCustomFonts =
     editorFontSettings.baseFontFamily !== "system-sans" ||
-    editorFontSettings.baseFontSize !== 15 ||
+    editorFontSettings.baseFontSize !== 16 ||
     editorFontSettings.boldWeight !== 600 ||
     editorFontSettings.lineHeight !== 1.6 ||
     textDirection !== "auto" ||
